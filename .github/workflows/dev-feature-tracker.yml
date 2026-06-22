@@ -1,0 +1,75 @@
+name: Dev Branch Feature Tracker
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [dev]
+
+jobs:
+  record-features:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract features from PR
+        id: extract
+        run: |
+          PR_BODY='${{ github.event.pull_request.body }}'
+          PR_TITLE='${{ github.event.pull_request.title }}'
+          PR_NUMBER='${{ github.event.pull_request.number }}'
+          SOURCE_BRANCH='${{ github.event.pull_request.head.ref }}'
+          
+          # 提取特性列表（从"更新了哪些特性"部分）
+          FEATURES=$(echo "$PR_BODY" | sed -n '/### 更新了哪些特性/,/### /p' | head -n -1 | tail -n +2 | sed 's/^- //; s/^[0-9]\. //')
+          
+          # 创建特性记录文件
+          mkdir -p .github/features
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          FILENAME=".github/features/${TIMESTAMP}_PR${PR_NUMBER}.md"
+          
+          cat > "$FILENAME" << EOF
+# 特性合并记录
+
+- **PR**: #$PR_NUMBER
+- **标题**: $PR_TITLE
+- **源分支**: $SOURCE_BRANCH
+- **合并时间**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+- **合并者**: ${{ github.event.pull_request.merged_by.login }}
+
+## 更新的特性
+
+$FEATURES
+
+## 完整 PR 描述
+
+$PR_BODY
+EOF
+          
+          echo "file=$FILENAME" >> $GITHUB_OUTPUT
+          echo "features<<EOF" >> $GITHUB_OUTPUT
+          echo "$FEATURES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit feature record
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/features/
+          git commit -m "docs: record merged features from PR #${{ github.event.pull_request.number }}"
+          git push origin dev
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const features = `${{ steps.extract.outputs.features }}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ 特性已记录到 dev 分支\n\n本次合并包含以下特性：\n\n${features}\n\n特性记录已保存到 \`.github/features/\` 目录，将在 dev -> main 的 PR 中汇总。`
+            })
