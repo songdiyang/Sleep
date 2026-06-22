@@ -29,52 +29,42 @@ impl Region {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityBarView {
     Explorer,
-    Search,
     SourceControl,
-    RunDebug,
-    Extensions,
+    Terminal,
 }
 
 impl ActivityBarView {
     pub fn label(&self) -> &'static str {
         match self {
             ActivityBarView::Explorer => "资源管理器",
-            ActivityBarView::Search => "搜索",
             ActivityBarView::SourceControl => "源代码管理",
-            ActivityBarView::RunDebug => "运行和调试",
-            ActivityBarView::Extensions => "扩展",
+            ActivityBarView::Terminal => "终端",
         }
     }
 
     pub fn icon(&self) -> &'static str {
         match self {
             ActivityBarView::Explorer => "📁",
-            ActivityBarView::Search => "🔍",
             ActivityBarView::SourceControl => "🌿",
-            ActivityBarView::RunDebug => "▶",
-            ActivityBarView::Extensions => "🧩",
+            ActivityBarView::Terminal => "⌨",
         }
     }
 }
 
 /// 侧边栏内容类型
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SidebarContent {
     FileTree,
-    SearchPanel,
     SourceControlPanel,
-    RunDebugPanel,
-    ExtensionsPanel,
+    TerminalPanel,
 }
 
 impl SidebarContent {
     pub fn from_view(view: ActivityBarView) -> Self {
         match view {
             ActivityBarView::Explorer => SidebarContent::FileTree,
-            ActivityBarView::Search => SidebarContent::SearchPanel,
             ActivityBarView::SourceControl => SidebarContent::SourceControlPanel,
-            ActivityBarView::RunDebug => SidebarContent::RunDebugPanel,
-            ActivityBarView::Extensions => SidebarContent::ExtensionsPanel,
+            ActivityBarView::Terminal => SidebarContent::TerminalPanel,
         }
     }
 }

@@ -516,10 +516,24 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         let command_palette_active = EDITOR_STATE.with(|s| {
                             s.borrow().as_ref().map(|state| state.borrow().command_palette.visible).unwrap_or(false)
                         });
+                        // 终端面板激活时，输入字符进入终端
+                        let terminal_active = EDITOR_STATE.with(|s| {
+                            s.borrow().as_ref().map(|state| {
+                                state.borrow().sidebar_content == crate::layout::SidebarContent::TerminalPanel
+                            }).unwrap_or(false)
+                        });
                         if command_palette_active {
                             EDITOR_STATE.with(|s| {
                                 if let Some(state) = s.borrow().as_ref() {
                                     state.borrow_mut().command_palette.append_query(c);
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else if terminal_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    state.borrow_mut().terminal_panel.input_line.push(c);
+                                    state.borrow_mut().terminal_panel.cursor_pos += 1;
                                     state.borrow_mut().render();
                                 }
                             });
@@ -787,32 +801,61 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 }
 
                 // 非Ctrl按键
+                let terminal_active = EDITOR_STATE.with(|s| {
+                    s.borrow().as_ref().map(|state| {
+                        state.borrow().sidebar_content == crate::layout::SidebarContent::TerminalPanel
+                    }).unwrap_or(false)
+                });
                 let has_selection = |st: &EditorState| {
                     st.selection_start.is_some() && st.selection_end.is_some()
                 };
                 match vk {
                     VK_RETURN => {
-                        EDITOR_STATE.with(|s| {
-                            if let Some(state) = s.borrow().as_ref() {
-                                let has_sel = has_selection(&state.borrow());
-                                if has_sel { state.borrow_mut().delete_selection(); }
-                                state.borrow_mut().insert_newline();
-                                state.borrow_mut().render();
-                            }
-                        });
+                        if terminal_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let input = state.borrow().terminal_panel.input_line.clone();
+                                    state.borrow_mut().terminal_panel.push_output(&format!("> {}", input));
+                                    state.borrow_mut().terminal_panel.send_enter();
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let has_sel = has_selection(&state.borrow());
+                                    if has_sel { state.borrow_mut().delete_selection(); }
+                                    state.borrow_mut().insert_newline();
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        }
                     }
                     VK_BACK => {
-                        EDITOR_STATE.with(|s| {
-                            if let Some(state) = s.borrow().as_ref() {
-                                let has_sel = has_selection(&state.borrow());
-                                if has_sel {
-                                    state.borrow_mut().delete_selection();
-                                } else {
-                                    state.borrow_mut().delete_char();
+                        if terminal_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let mut st = state.borrow_mut();
+                                    if !st.terminal_panel.input_line.is_empty() {
+                                        st.terminal_panel.input_line.pop();
+                                        st.terminal_panel.cursor_pos = st.terminal_panel.cursor_pos.saturating_sub(1);
+                                    }
+                                    st.render();
                                 }
-                                state.borrow_mut().render();
-                            }
-                        });
+                            });
+                        } else {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let has_sel = has_selection(&state.borrow());
+                                    if has_sel {
+                                        state.borrow_mut().delete_selection();
+                                    } else {
+                                        state.borrow_mut().delete_char();
+                                    }
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        }
                     }
                     VK_DELETE => {
                         EDITOR_STATE.with(|s| {

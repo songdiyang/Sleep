@@ -220,14 +220,28 @@ impl EditorState {
             let border_rect = D2D_RECT_F { left: x + width - 1.0, top: y, right: x + width, bottom: y + height };
             target.FillRectangle(&border_rect, &border_brush);
 
+            match &self.sidebar_content {
+                crate::layout::SidebarContent::FileTree => {
+                    self.render_file_tree_sidebar(target, x, y, width, height, &text_brush);
+                }
+                crate::layout::SidebarContent::SourceControlPanel => {
+                    self.render_source_control_sidebar(target, x, y, width, height, &text_brush);
+                }
+                crate::layout::SidebarContent::TerminalPanel => {
+                    self.render_terminal_sidebar(target, x, y, width, height, &text_brush);
+                }
+            }
+        }
+    }
+
+    fn render_file_tree_sidebar(&mut self, target: &windows::Win32::Graphics::Direct2D::ID2D1HwndRenderTarget, x: f32, y: f32, width: f32, height: f32, text_brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush) {
+        unsafe {
             let ui_format = self.text_format_cache.get_format(12.0, DWRITE_FONT_WEIGHT_NORMAL.0 as u32, DWRITE_TEXT_ALIGNMENT_LEADING.0 as u32, DWRITE_PARAGRAPH_ALIGNMENT_NEAR.0 as u32).unwrap();
             let tree_format = self.text_format_cache.get_format(13.0, DWRITE_FONT_WEIGHT_NORMAL.0 as u32, DWRITE_TEXT_ALIGNMENT_LEADING.0 as u32, DWRITE_PARAGRAPH_ALIGNMENT_NEAR.0 as u32).unwrap();
             let dir_color = color_f(0.9, 0.9, 0.9, 1.0);
             let dir_brush = self.brush_cache.get_brush(target, &dir_color).unwrap();
 
             if let Some(tree) = &self.file_tree {
-                // 虚拟滚动：通过 sidebar_scroll_y 偏移实现大项目侧边栏性能优化
-                // current_y 起始位置减去滚动偏移，使得节点位置相对于可视区域
                 let mut current_y = y + 10.0 - self.sidebar_scroll_y;
                 let sel_color = color_f(0.0, 0.47, 0.83, 1.0);
                 let sel_brush = self.brush_cache.get_brush(target, &sel_color).unwrap();
@@ -237,8 +251,59 @@ impl EditorState {
             } else {
                 let text: Vec<u16> = "按 Ctrl+K 打开文件夹".encode_utf16().chain(Some(0)).collect();
                 let text_rect = D2D_RECT_F { left: x + 10.0, top: y + 10.0, right: x + width - 10.0, bottom: y + 30.0 };
-                target.DrawText(&text, &ui_format, &text_rect, &text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                target.DrawText(&text, &ui_format, &text_rect, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
+        }
+    }
+
+    fn render_source_control_sidebar(&mut self, target: &windows::Win32::Graphics::Direct2D::ID2D1HwndRenderTarget, x: f32, y: f32, width: f32, _height: f32, text_brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush) {
+        unsafe {
+            let ui_format = self.text_format_cache.get_format(12.0, DWRITE_FONT_WEIGHT_NORMAL.0 as u32, DWRITE_TEXT_ALIGNMENT_LEADING.0 as u32, DWRITE_PARAGRAPH_ALIGNMENT_NEAR.0 as u32).unwrap();
+            let text: Vec<u16> = "源代码管理".encode_utf16().chain(Some(0)).collect();
+            let text_rect = D2D_RECT_F { left: x + 10.0, top: y + 10.0, right: x + width - 10.0, bottom: y + 30.0 };
+            target.DrawText(&text, &ui_format, &text_rect, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+    }
+
+    fn render_terminal_sidebar(&mut self, target: &windows::Win32::Graphics::Direct2D::ID2D1HwndRenderTarget, x: f32, y: f32, width: f32, height: f32, text_brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush) {
+        unsafe {
+            let ui_format = self.text_format_cache.get_format(12.0, DWRITE_FONT_WEIGHT_NORMAL.0 as u32, DWRITE_TEXT_ALIGNMENT_LEADING.0 as u32, DWRITE_PARAGRAPH_ALIGNMENT_NEAR.0 as u32).unwrap();
+            let mono_format = self.text_format_cache.get_format(11.0, DWRITE_FONT_WEIGHT_NORMAL.0 as u32, DWRITE_TEXT_ALIGNMENT_LEADING.0 as u32, DWRITE_PARAGRAPH_ALIGNMENT_NEAR.0 as u32).unwrap();
+            
+            // 标题
+            let title: Vec<u16> = "终端".encode_utf16().chain(Some(0)).collect();
+            let title_rect = D2D_RECT_F { left: x + 10.0, top: y + 8.0, right: x + width - 10.0, bottom: y + 28.0 };
+            target.DrawText(&title, &ui_format, &title_rect, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            
+            // 分隔线
+            let sep_color = color_f(0.2, 0.2, 0.2, 1.0);
+            let sep_brush = self.brush_cache.get_brush(target, &sep_color).unwrap();
+            let sep_rect = D2D_RECT_F { left: x, top: y + 30.0, right: x + width, bottom: y + 31.0 };
+            target.FillRectangle(&sep_rect, &sep_brush);
+            
+            // 终端输出内容
+            let output_color = color_f(0.8, 0.8, 0.8, 1.0);
+            let output_brush = self.brush_cache.get_brush(target, &output_color).unwrap();
+            let mut line_y = y + 40.0;
+            for line in self.terminal_panel.visible_output() {
+                let text: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
+                let text_rect = D2D_RECT_F { left: x + 10.0, top: line_y, right: x + width - 10.0, bottom: line_y + 18.0 };
+                target.DrawText(&text, &mono_format, &text_rect, &output_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                line_y += 16.0;
+                if line_y > y + height - 30.0 { break; }
+            }
+            
+            // 输入提示符
+            let prompt_color = color_f(0.0, 0.8, 0.0, 1.0);
+            let prompt_brush = self.brush_cache.get_brush(target, &prompt_color).unwrap();
+            let prompt: Vec<u16> = "> ".encode_utf16().chain(Some(0)).collect();
+            let prompt_rect = D2D_RECT_F { left: x + 10.0, top: line_y, right: x + 30.0, bottom: line_y + 18.0 };
+            target.DrawText(&prompt, &mono_format, &prompt_rect, &prompt_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            
+            // 输入行
+            let input: Vec<u16> = self.terminal_panel.input_line.encode_utf16().chain(Some(0)).collect();
+            let input_rect = D2D_RECT_F { left: x + 25.0, top: line_y, right: x + width - 10.0, bottom: line_y + 18.0 };
+            target.DrawText(&input, &mono_format, &input_rect, &output_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
     }
 

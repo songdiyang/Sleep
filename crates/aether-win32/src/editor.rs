@@ -22,6 +22,7 @@ use crate::status_bar::StatusBar;
 use crate::tabs::{Tab, TabLayout};
 use crate::command_palette::CommandPalette;
 use crate::git::GitIntegration;
+use crate::terminal::TerminalPanel;
 
 /// 编辑器应用状态
 pub struct EditorState {
@@ -92,6 +93,8 @@ pub struct EditorState {
     pub multi_cursor: MultiCursorState,
     /// Git 集成
     pub git: GitIntegration,
+    /// 终端面板
+    pub terminal_panel: TerminalPanel,
     /// D2D 画刷缓存
     pub brush_cache: BrushCache,
     /// DirectWrite 文本格式缓存
@@ -337,6 +340,7 @@ impl EditorState {
             command_palette: CommandPalette::new(),
             multi_cursor: MultiCursorState::new(),
             git: GitIntegration::new(),
+            terminal_panel: TerminalPanel::new(),
             brush_cache: BrushCache::new(),
             text_format_cache: TextFormatCache::new().unwrap_or_else(|_| TextFormatCache::new().unwrap()),
             is_maximized: false,

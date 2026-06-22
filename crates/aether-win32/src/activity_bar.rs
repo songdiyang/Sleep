@@ -30,10 +30,8 @@ impl ActivityBar {
     pub fn new() -> Self {
         let items = vec![
             ActivityItem::new(ActivityBarView::Explorer),
-            ActivityItem::new(ActivityBarView::Search),
             ActivityItem::new(ActivityBarView::SourceControl),
-            ActivityItem::new(ActivityBarView::RunDebug),
-            ActivityItem::new(ActivityBarView::Extensions),
+            ActivityItem::new(ActivityBarView::Terminal),
         ];
         Self {
             active_index: 0,

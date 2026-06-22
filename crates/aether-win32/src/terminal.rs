@@ -111,7 +111,7 @@ impl TerminalPanel {
     }
 
     /// 添加输出行
-    fn push_output(&mut self, text: &str) {
+    pub fn push_output(&mut self, text: &str) {
         for line in text.lines() {
             if self.output_lines.len() >= self.max_lines {
                 self.output_lines.pop_front();
