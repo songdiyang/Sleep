@@ -96,6 +96,8 @@ impl std::error::Error for GitError {}
 /// Git 仓库管理器
 pub struct GitRepository {
     repo: Repository,
+    /// 仓库配置（预留字段，当前未使用）
+    #[allow(dead_code)]
     config: GitRepoConfig,
 }
 

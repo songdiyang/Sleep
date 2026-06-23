@@ -24,8 +24,17 @@ use crate::command_palette::CommandPalette;
 use crate::git::GitIntegration;
 use crate::ssh::{SshConnectionDialog, RemoteSession, RemoteFileTree, CloneRepoDialog};
 use crate::terminal::TerminalPanel;
+use crate::ai_panel::AiPanel;
 use aether_shared::settings::AppSettings;
 use crate::settings::SettingsPanel;
+
+/// 查找替换焦点状态
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindReplaceFocus {
+    None,
+    FindQuery,
+    ReplaceText,
+}
 
 /// 编辑器应用状态
 pub struct EditorState {
@@ -72,6 +81,11 @@ pub struct EditorState {
     pub replace_text: String,
     pub find_results: Vec<(usize, usize)>, // (line, col) 匹配位置列表
     pub find_active_index: usize,
+    /// 查找替换焦点状态
+    pub find_focus: FindReplaceFocus,
+    /// 查找缓存：避免查询未变时重复全量扫描
+    last_find_query: String,
+    find_result_version: u64,
     // 全局 UI 状态
     pub file_tree: Option<FileTree>,
     pub current_folder: Option<PathBuf>,
@@ -98,6 +112,8 @@ pub struct EditorState {
     pub git: GitIntegration,
     /// 终端面板
     pub terminal_panel: TerminalPanel,
+    /// AI 助手面板
+    pub ai_panel: AiPanel,
     /// SSH 连接对话框
     pub ssh_dialog: SshConnectionDialog,
     /// 远程会话
@@ -126,6 +142,12 @@ pub struct EditorState {
     pub hover_file_node: Option<u32>,
     /// 侧边栏滚动偏移（用于文件树虚拟滚动）
     pub sidebar_scroll_y: f32,
+    /// 应用设置
+    pub app_settings: aether_shared::settings::AppSettings,
+    /// 设置面板
+    pub settings_panel: crate::settings::SettingsPanel,
+    /// Git 面板
+    pub git_panel: crate::git::GitIntegration,
 }
 
 impl EditorState {
@@ -341,6 +363,9 @@ impl EditorState {
             replace_text: String::new(),
             find_results: Vec::new(),
             find_active_index: 0,
+            find_focus: FindReplaceFocus::None,
+            last_find_query: String::new(),
+            find_result_version: 0,
             file_tree: None,
             current_folder: None,
             status_message: "就绪".to_string(),
@@ -359,6 +384,7 @@ impl EditorState {
             multi_cursor: MultiCursorState::new(),
             git: GitIntegration::new(),
             terminal_panel: TerminalPanel::new(),
+            ai_panel: AiPanel::new(),
             settings_panel: SettingsPanel::from_settings(&app_settings),
             app_settings,
             ssh_dialog: SshConnectionDialog::new(),
@@ -375,6 +401,7 @@ impl EditorState {
             selected_file_node: None,
             hover_file_node: None,
             sidebar_scroll_y: 0.0,
+            git_panel: crate::git::GitIntegration::new(),
         };
         // 创建第一个标签页并同步
         state.tabs.push(Tab::new());
@@ -580,7 +607,7 @@ impl EditorState {
 
     /// 保存文件，返回是否成功
     pub fn save_file(&mut self) -> bool {
-        if let Some(path) = &self.file_path {
+        if let Some(path) = &self.file_path.clone() {
             let text = self.buffer.get_all_text();
             // 处理远程文件保存
             if let Some(remote_path) = path.to_str().and_then(|s| s.strip_prefix("remote:")) {
@@ -784,6 +811,14 @@ impl EditorState {
                 let max_scroll = (total_height - visible_height).max(0.0);
                 self.git.scroll_y = (self.git.scroll_y + delta_y).clamp(0.0, max_scroll);
             }
+            crate::layout::SidebarContent::AiAssistantPanel => {
+                let msg_height = 60.0;
+                let total_height = self.ai_panel.messages.len() as f32 * msg_height + 200.0;
+                let sidebar_region = self.layout.sidebar_region();
+                let visible_height = sidebar_region.height;
+                let max_scroll = (total_height - visible_height).max(0.0);
+                self.ai_panel.scroll_y = (self.ai_panel.scroll_y + delta_y).clamp(0.0, max_scroll);
+            }
             _ => {}
         }
     }
@@ -891,10 +926,10 @@ impl EditorState {
                 self.paste();
             }
             crate::menu_bar::CommandId::EditFind => {
-                self.status_message = "查找功能即将推出".to_string();
+                self.toggle_find();
             }
             crate::menu_bar::CommandId::EditReplace => {
-                self.status_message = "替换功能即将推出".to_string();
+                self.toggle_replace();
             }
             crate::menu_bar::CommandId::EditSelectAll | crate::menu_bar::CommandId::SelectAll => {
                 self.select_all();
@@ -927,7 +962,11 @@ impl EditorState {
                 self.status_message = "调试功能即将推出".to_string();
             }
             crate::menu_bar::CommandId::TerminalNew => {
-                self.status_message = "终端功能即将推出".to_string();
+                self.layout.toggle_bottom_panel();
+                if self.layout.bottom_panel_visible && !self.terminal_panel.running {
+                    let _ = self.terminal_panel.start();
+                }
+                self.status_message = if self.layout.bottom_panel_visible { "终端已打开" } else { "终端已关闭" }.to_string();
             }
             crate::menu_bar::CommandId::HelpAbout => {
                 self.status_message = "牧羊人编辑器 v0.1.0".to_string();
@@ -1486,15 +1525,59 @@ impl EditorState {
         self.status_message = "已修改".to_string();
     }
 
+    pub fn insert_tab(&mut self) {
+        let pos = self.cursor_byte_pos();
+        let before_pieces = self.buffer.get_pieces();
+        let before_add_len = self.buffer.add_buffer_len();
+        let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+
+        let tab_text = "    ";
+        self.buffer.insert(pos, tab_text);
+        self.cursor_col += tab_text.len();
+        self.is_dirty = true;
+        self.buffer_version += 1;
+
+        let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+        self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, pos);
+        self.status_message = "已修改".to_string();
+    }
+
     pub fn insert_newline(&mut self) {
         let pos = self.cursor_byte_pos();
         let before_pieces = self.buffer.get_pieces();
         let before_add_len = self.buffer.add_buffer_len();
         let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
 
-        self.buffer.insert(pos, "\n");
+        // 获取当前行的前导空白（用于自动缩进）
+        let indent = if let Some(line_text) = self.buffer.get_line(self.cursor_line) {
+            let leading_ws: String = line_text.chars().take_while(|c| c.is_whitespace()).collect();
+            leading_ws
+        } else {
+            String::new()
+        };
+
+        // 检测是否需要额外缩进（行尾有 { 或 :）
+        let extra_indent = if let Some(line_text) = self.buffer.get_line(self.cursor_line) {
+            let trimmed = line_text.trim_end();
+            if trimmed.ends_with('{') || trimmed.ends_with(':') {
+                "    "
+            } else {
+                ""
+            }
+        } else {
+            ""
+        };
+
+        let full_indent = format!("{}{}", indent, extra_indent);
+        let insert_text = if full_indent.is_empty() {
+            "\n".to_string()
+        } else {
+            format!("\n{}", full_indent)
+        };
+
+        self.buffer.insert(pos, &insert_text);
         self.cursor_line += 1;
-        self.cursor_col = 0;
+        self.cursor_col = full_indent.len();
         self.is_dirty = true;
         self.buffer_version += 1;
 
@@ -1870,7 +1953,6 @@ impl EditorState {
     /// 增量重建缓存：只重建可见行范围内的缓存，大幅减少大文件的词法分析开销
     pub(crate) fn rebuild_cache(&mut self, visible_start: usize, visible_end: usize) {
         let total_lines = self.buffer.len_lines().max(1);
-        let lexer = self.language.create_lexer();
 
         // 如果行数变化，重新调整缓存向量大小
         if self.cached_lines.len() != total_lines {
@@ -1888,10 +1970,17 @@ impl EditorState {
         let cache_start = visible_start.saturating_sub(2);
         let cache_end = (visible_end + 2).min(total_lines);
 
+        // 延迟创建 lexer：只在发现至少一行需要重建时才创建
+        // 避免每帧都创建 lexer（Box 分配 + 初始化开销）
+        let mut lexer: Option<Box<dyn aether_core::lexer::Lexer>> = None;
+
         for i in cache_start..cache_end {
             if self.line_cache_versions[i] != self.buffer_version {
+                if lexer.is_none() {
+                    lexer = Some(self.language.create_lexer());
+                }
                 let line = self.buffer.get_line(i).unwrap_or_default();
-                let tokens = lexer.lex_full(&line);
+                let tokens = lexer.as_ref().unwrap().lex_full(&line);
                 self.cached_lines[i] = line;
                 self.cached_tokens[i] = tokens;
                 self.line_cache_versions[i] = self.buffer_version;
@@ -1963,6 +2052,236 @@ impl EditorState {
             result.end_line.min(total_lines.saturating_sub(1))
         };
         self.invalidate_line_cache(result.start_line, end_line);
+    }
+
+    /// 查找所有匹配位置
+    /// 优化：缓存查询结果，避免查询未变且文本未变时重复全量扫描
+    pub fn find_all(&mut self) {
+        self.find_active_index = 0;
+        if self.find_query.is_empty() {
+            self.find_results.clear();
+            self.last_find_query.clear();
+            return;
+        }
+        // 缓存命中：查询和文本版本都未变，跳过搜索
+        if self.find_query == self.last_find_query && self.find_result_version == self.buffer_version && !self.find_results.is_empty() {
+            // 结果已有效，无需重新搜索
+            return;
+        }
+        // 缓存未命中：清空并重新搜索
+        self.find_results.clear();
+        let query = self.find_query.clone();
+        let total_lines = self.buffer.len_lines();
+        for line_idx in 0..total_lines {
+            if let Some(line) = self.buffer.get_line(line_idx) {
+                let mut start = 0;
+                while let Some(pos) = line[start..].find(&query) {
+                    let abs_pos = start + pos;
+                    self.find_results.push((line_idx, abs_pos));
+                    start = abs_pos + query.len();
+                    if start >= line.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        // 更新缓存状态
+        self.last_find_query = query;
+        self.find_result_version = self.buffer_version;
+    }
+
+    /// 跳转到下一个匹配
+    pub fn find_next(&mut self) {
+        if self.find_results.is_empty() {
+            self.find_all();
+        }
+        if !self.find_results.is_empty() {
+            self.find_active_index = (self.find_active_index + 1) % self.find_results.len();
+            let (line, col) = self.find_results[self.find_active_index];
+            self.cursor_line = line;
+            self.cursor_col = col;
+            // 选中匹配文本
+            self.selection_start = Some((line, col));
+            self.selection_end = Some((line, col + self.find_query.len()));
+        }
+    }
+
+    /// 跳转到上一个匹配
+    pub fn find_prev(&mut self) {
+        if self.find_results.is_empty() {
+            self.find_all();
+        }
+        if !self.find_results.is_empty() {
+            if self.find_active_index == 0 {
+                self.find_active_index = self.find_results.len() - 1;
+            } else {
+                self.find_active_index -= 1;
+            }
+            let (line, col) = self.find_results[self.find_active_index];
+            self.cursor_line = line;
+            self.cursor_col = col;
+            self.selection_start = Some((line, col));
+            self.selection_end = Some((line, col + self.find_query.len()));
+        }
+    }
+
+    /// 替换当前匹配
+    pub fn replace_current(&mut self) -> bool {
+        if self.find_results.is_empty() || self.find_active_index >= self.find_results.len() {
+            return false;
+        }
+        let (line, col) = self.find_results[self.find_active_index];
+        let pos = self.line_byte_start(line) + col;
+        let end_pos = pos + self.find_query.len();
+
+        let before_pieces = self.buffer.get_pieces();
+        let before_add_len = self.buffer.add_buffer_len();
+        let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+
+        self.buffer.delete(pos, end_pos);
+        self.buffer.insert(pos, &self.replace_text);
+        self.is_dirty = true;
+        self.buffer_version += 1;
+
+        self.cursor_line = line;
+        self.cursor_col = col + self.replace_text.len();
+        let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+        self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, pos);
+
+        // 重新查找
+        self.find_all();
+        true
+    }
+
+    /// 替换所有匹配
+    pub fn replace_all(&mut self) -> usize {
+        if self.find_query.is_empty() || self.find_query == self.replace_text {
+            return 0;
+        }
+        self.find_all();
+        let count = self.find_results.len();
+        if count == 0 {
+            return 0;
+        }
+
+        // 从后往前替换，避免位置偏移
+        let replacements = self.find_results.clone();
+        let query_len = self.find_query.len();
+        let replace_text = self.replace_text.clone();
+
+        for (line, col) in replacements.iter().rev() {
+            let pos = self.line_byte_start(*line) + *col;
+            let end_pos = pos + query_len;
+            self.buffer.delete(pos, end_pos);
+            self.buffer.insert(pos, &replace_text);
+        }
+
+        self.is_dirty = true;
+        self.buffer_version += 1;
+        self.find_results.clear();
+        self.find_active_index = 0;
+        self.status_message = format!("已替换 {} 处", count);
+        count
+    }
+
+    /// 切换查找面板
+    pub fn toggle_find(&mut self) {
+        self.find_visible = !self.find_visible;
+        if !self.find_visible {
+            self.replace_visible = false;
+            self.find_focus = FindReplaceFocus::None;
+        } else {
+            self.find_focus = FindReplaceFocus::FindQuery;
+        }
+        if self.find_visible && !self.find_query.is_empty() {
+            self.find_all();
+        }
+    }
+
+    /// 切换替换面板
+    pub fn toggle_replace(&mut self) {
+        self.replace_visible = !self.replace_visible;
+        self.find_visible = self.replace_visible || self.find_visible;
+        if !self.find_visible {
+            self.find_focus = FindReplaceFocus::None;
+        } else {
+            self.find_focus = if self.replace_visible { FindReplaceFocus::FindQuery } else { FindReplaceFocus::None };
+        }
+        if self.find_visible && !self.find_query.is_empty() {
+            self.find_all();
+        }
+    }
+
+    /// 关闭查找替换面板
+    pub fn close_find_replace(&mut self) {
+        self.find_visible = false;
+        self.replace_visible = false;
+        self.find_focus = FindReplaceFocus::None;
+    }
+
+    /// 应用 AI 生成的代码到当前编辑器
+    pub fn apply_ai_code(&mut self, code: &str) -> bool {
+        if code.is_empty() {
+            return false;
+        }
+        // 如果有选区，替换选区内容；否则在当前光标位置插入
+        if self.selection_start.is_some() && self.selection_end.is_some() {
+            let (start_line, start_col) = self.selection_start.unwrap();
+            let (end_line, end_col) = self.selection_end.unwrap();
+            let (first_line, first_col) = if start_line <= end_line { (start_line, start_col) } else { (end_line, end_col) };
+            let (last_line, last_col) = if start_line <= end_line { (end_line, end_col) } else { (start_line, start_col) };
+            let start_byte = self.line_byte_start(first_line) + first_col;
+            let end_byte = self.line_byte_start(last_line) + last_col;
+            
+            let before_pieces = self.buffer.get_pieces();
+            let before_add_len = self.buffer.add_buffer_len();
+            let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+            
+            self.buffer.delete(start_byte, end_byte);
+            self.buffer.insert(start_byte, code);
+            
+            // 计算新光标位置
+            let code_lines: Vec<&str> = code.lines().collect();
+            let new_line = first_line + code_lines.len().saturating_sub(1);
+            let new_col = if code_lines.len() <= 1 {
+                first_col + code.len()
+            } else {
+                code_lines.last().unwrap_or(&"").len()
+            };
+            self.cursor_line = new_line;
+            self.cursor_col = new_col;
+            let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+            self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, start_byte);
+            
+            self.clear_selection();
+            self.is_dirty = true;
+            self.buffer_version += 1;
+            self.status_message = "已应用 AI 代码".to_string();
+            return true;
+        }
+        let pos = self.cursor_byte_pos();
+        let before_pieces = self.buffer.get_pieces();
+        let before_add_len = self.buffer.add_buffer_len();
+        let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+        
+        self.buffer.insert(pos, code);
+        
+        // 更新光标位置
+        let _code_lines: Vec<&str> = code.lines().collect();
+        let line_breaks = code.matches('\n').count();
+        if line_breaks == 0 {
+            self.cursor_col += code.len();
+        } else {
+            self.cursor_line += line_breaks;
+            self.cursor_col = code.rsplit_once('\n').map(|(_, last)| last.len()).unwrap_or(0);
+        }
+        let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+        self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, pos);
+        
+        self.is_dirty = true;
+        self.buffer_version += 1;
+        self.status_message = "已插入 AI 代码".to_string();
+        true
     }
 }
 

@@ -31,17 +31,14 @@ fn set_dpi_awareness() {
 /// 启用 DWM Acrylic / Mica  backdrop 效果
 fn enable_dwm_acrylic(hwnd: HWND) {
     unsafe {
-        // DWM 属性常量（Windows 10 1903+ / Windows 11）
-        const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
-        const DWMWA_USE_HOST_BACKDROP_BRUSH: u32 = 17;
-        const DWMWA_MICA_EFFECT: u32 = 1029;
+        // DWM 属性常量
         const DWBT_MAINWINDOW: u32 = 0;
 
         // 启用沉浸式暗色模式
         let dark_mode: windows::Win32::Foundation::BOOL = true.into();
         let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
             hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            windows::Win32::Graphics::Dwm::DWMWA_USE_IMMERSIVE_DARK_MODE,
             &dark_mode as *const _ as *const std::ffi::c_void,
             std::mem::size_of::<windows::Win32::Foundation::BOOL>() as u32,
         );
@@ -49,7 +46,7 @@ fn enable_dwm_acrylic(hwnd: HWND) {
         // Windows 11: 使用主机 backdrop brush (Acrylic/Mica)
         let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
             hwnd,
-            DWMWA_USE_HOST_BACKDROP_BRUSH,
+            windows::Win32::Graphics::Dwm::DWMWA_USE_HOSTBACKDROPBRUSH,
             &DWBT_MAINWINDOW as *const _ as *const std::ffi::c_void,
             std::mem::size_of::<u32>() as u32,
         );
@@ -58,7 +55,7 @@ fn enable_dwm_acrylic(hwnd: HWND) {
         let mica_enabled: windows::Win32::Foundation::BOOL = true.into();
         let _ = windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
             hwnd,
-            DWMWA_MICA_EFFECT,
+            windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(1029i32),
             &mica_enabled as *const _ as *const std::ffi::c_void,
             std::mem::size_of::<windows::Win32::Foundation::BOOL>() as u32,
         );
@@ -167,6 +164,8 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 EDITOR_STATE.with(|s| {
                     if let Some(state) = s.borrow().as_ref() {
                         let mut st = state.borrow_mut();
+                        // 默认取消终端焦点，只有点击底部面板时才聚焦
+                        st.terminal_panel.focused = false;
                         // 将物理像素转换为逻辑像素(DIP)
                         let mouse_x = raw_x / st.dpi_scale;
                         let mouse_y = raw_y / st.dpi_scale;
@@ -239,8 +238,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                                         st.clone_dialog.error_message = Some(e);
                                                     }
                                                 }
+                                                drop(st);
+                                                state.borrow_mut().render();
+                                                return;
                                             }
-                                            drop(st);
+                                            // 文件夹对话框取消
                                             state.borrow_mut().render();
                                             return;
                                         }
@@ -265,6 +267,10 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             let minimize_x = maximize_x - btn_width;
                             
                             // 先检测是否点击了窗口控制按钮区域
+                            let panel_btn_width = 32.0;
+                            let right_panel_btn_x = minimize_x - panel_btn_width;
+                            let bottom_panel_btn_x = right_panel_btn_x - panel_btn_width;
+                            
                             if mouse_x >= minimize_x {
                                 if mouse_x >= close_x {
                                     // 关闭窗口
@@ -287,6 +293,18 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                     let _ = ShowWindow(hwnd, SW_MINIMIZE);
                                     return;
                                 }
+                            } else if mouse_x >= right_panel_btn_x {
+                                // 切换右侧面板可见性
+                                st.layout.right_panel_visible = !st.layout.right_panel_visible;
+                                drop(st);
+                                state.borrow_mut().render();
+                                return;
+                            } else if mouse_x >= bottom_panel_btn_x {
+                                // 切换底部面板可见性
+                                st.layout.bottom_panel_visible = !st.layout.bottom_panel_visible;
+                                drop(st);
+                                state.borrow_mut().render();
+                                return;
                             }
                             
                             // 检测是否点击了菜单项
@@ -348,6 +366,28 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             }
                         }
 
+                        // 3. 检测拖拽边框点击（在侧边栏之前）
+                        let editor_region = layout.editor_region();
+                        let right_panel_resize_zone = layout.right_panel_visible &&
+                            (mouse_x >= editor_region.right() - 4.0 && mouse_x <= editor_region.right() + 4.0) &&
+                            mouse_y >= editor_region.y && mouse_y < editor_region.y + editor_region.height;
+                        let bottom_panel_resize_zone = layout.bottom_panel_visible &&
+                            (mouse_y >= editor_region.bottom() - 4.0 && mouse_y <= editor_region.bottom() + 4.0) &&
+                            mouse_x >= editor_region.x && mouse_x < editor_region.x + editor_region.width;
+
+                        if right_panel_resize_zone {
+                            st.layout.right_panel_resizing = true;
+                            drop(st);
+                            state.borrow_mut().render();
+                            return;
+                        }
+                        if bottom_panel_resize_zone {
+                            st.layout.bottom_panel_resizing = true;
+                            drop(st);
+                            state.borrow_mut().render();
+                            return;
+                        }
+
                         // 3. 检测侧边栏点击
                         let sidebar_region = layout.sidebar_region();
                         if sidebar_region.contains(mouse_x, mouse_y) {
@@ -397,6 +437,71 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                     state.borrow_mut().render();
                                     return;
                                 }
+                            } else if st.sidebar_content == crate::layout::SidebarContent::AiAssistantPanel {
+                                // AI 面板点击处理
+                                let mut handled = false;
+                                let actions = crate::ai_panel::AiPanel::quick_actions();
+                                let margin = 10.0;
+                                let btn_w = (sidebar_region.width - margin * 2.0 - 8.0) / 2.0;
+                                let btn_h = 28.0;
+                                let btn_gap = 8.0;
+                                let action_start_y = 52.0; // 标题 + 分隔线 + 边距
+                                let action_rows = (actions.len() + 1) / 2;
+                                let action_end_y = action_start_y + action_rows as f32 * (btn_h + 6.0) + 8.0;
+
+                                // 检测快捷操作按钮点击
+                                if sidebar_rel_y >= action_start_y && sidebar_rel_y < action_end_y {
+                                    for (i, action) in actions.iter().enumerate() {
+                                        let col = i % 2;
+                                        let row = i / 2;
+                                        let bx = margin + col as f32 * (btn_w + btn_gap);
+                                        let by = action_start_y + row as f32 * (btn_h + 6.0);
+                                        if sidebar_rel_x >= bx && sidebar_rel_x < bx + btn_w && sidebar_rel_y >= by && sidebar_rel_y < by + btn_h {
+                                            // 获取选中的代码
+                                            let selected_code = if let Some(text) = st.get_selected_text() {
+                                                text
+                                            } else {
+                                                // 如果没有选中文本，使用当前文件内容（简化）
+                                                st.buffer.get_all_text().chars().take(2000).collect::<String>()
+                                            };
+                                            let settings = st.app_settings.ai.clone();
+                                            let action_clone = *action;
+                                            drop(st);
+                                            let _ = state.borrow_mut().ai_panel.send_quick_action(action_clone, &selected_code, &settings);
+                                            state.borrow_mut().render();
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                // 检测 Apply 按钮点击
+                                let apply_y = sidebar_region.height - 76.0;
+                                let apply_btn_w = 80.0;
+                                let apply_btn_h = 24.0;
+                                let apply_btn_x = sidebar_region.width - margin - apply_btn_w;
+                                if sidebar_rel_x >= apply_btn_x && sidebar_rel_x < apply_btn_x + apply_btn_w &&
+                                    sidebar_rel_y >= apply_y && sidebar_rel_y < apply_y + apply_btn_h {
+                                    if let Some(code) = st.ai_panel.extract_last_code_block() {
+                                        st.apply_ai_code(&code);
+                                        st.status_message = "AI 代码已应用到编辑器".to_string();
+                                    }
+                                    drop(st);
+                                    state.borrow_mut().render();
+                                    return;
+                                }
+
+                                // 检测输入框点击
+                                let input_y = sidebar_region.height - 40.0;
+                                if sidebar_rel_y >= input_y && sidebar_rel_y < input_y + 32.0 && sidebar_rel_x >= margin && sidebar_rel_x < sidebar_region.width - margin {
+                                    // 点击输入框，不处理（键盘输入由 WM_CHAR 处理）
+                                    handled = true;
+                                }
+
+                                if handled {
+                                    drop(st);
+                                    state.borrow_mut().render();
+                                    return;
+                                }
                             } else if st.handle_sidebar_click(sidebar_rel_x, sidebar_rel_y) {
                                 drop(st);
                                 state.borrow_mut().render();
@@ -413,6 +518,44 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 state.borrow_mut().render();
                                 return;
                             }
+                        }
+
+                        // 4.5 检测查找替换面板点击
+                        if st.find_visible {
+                            let editor_region = layout.editor_content_region(has_multiple_tabs);
+                            let panel_height = if st.replace_visible { 72.0 } else { 40.0 };
+                            let panel_width = editor_region.width.min(600.0);
+                            let panel_x = editor_region.x + editor_region.width - panel_width - 10.0;
+                            let panel_y = editor_region.y;
+                            if mouse_x >= panel_x && mouse_x < panel_x + panel_width && mouse_y >= panel_y && mouse_y < panel_y + panel_height {
+                                let input_h = 24.0;
+                                let input_w = panel_width - 120.0;
+                                let find_y = panel_y + 8.0;
+                                let find_input_x = panel_x + 50.0;
+                                let find_input_w = input_w;
+                                if mouse_x >= find_input_x && mouse_x < find_input_x + find_input_w && mouse_y >= find_y && mouse_y < find_y + input_h {
+                                    st.find_focus = crate::editor::FindReplaceFocus::FindQuery;
+                                } else if st.replace_visible {
+                                    let replace_y = panel_y + 8.0 + input_h + 8.0;
+                                    let replace_input_x = panel_x + 50.0;
+                                    let replace_input_w = input_w;
+                                    if mouse_x >= replace_input_x && mouse_x < replace_input_x + replace_input_w && mouse_y >= replace_y && mouse_y < replace_y + input_h {
+                                        st.find_focus = crate::editor::FindReplaceFocus::ReplaceText;
+                                    }
+                                }
+                                drop(st);
+                                state.borrow_mut().render();
+                                return;
+                            }
+                        }
+
+                        // 4.6 检测底部面板点击
+                        let bottom_panel_region = layout.bottom_panel_region();
+                        if bottom_panel_region.contains(mouse_x, mouse_y) {
+                            st.terminal_panel.focused = true;
+                            drop(st);
+                            state.borrow_mut().render();
+                            return;
                         }
 
                         // 5. 欢迎页/编辑器区域点击
@@ -479,7 +622,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let raw_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
                 let is_dragging = wparam.0 & 0x0001 != 0; // MK_LBUTTON
 
-                EDITOR_STATE.with(|s| {
+                EDITOR_STATE.with(|s| -> LRESULT {
                     if let Some(state) = s.borrow().as_ref() {
                         let mut st = state.borrow_mut();
                         // 将物理像素转换为逻辑像素(DIP)
@@ -511,6 +654,10 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             let minimize_x = maximize_x - btn_width;
                             
                             // 检测窗口控制按钮悬停
+                            let panel_btn_width = 32.0;
+                            let right_panel_btn_x = minimize_x - panel_btn_width;
+                            let bottom_panel_btn_x = right_panel_btn_x - panel_btn_width;
+                            
                             if mouse_x >= minimize_x {
                                 if mouse_x >= close_x {
                                     st.titlebar_hover_button = Some(2);
@@ -519,6 +666,10 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 } else {
                                     st.titlebar_hover_button = Some(0);
                                 }
+                            } else if mouse_x >= right_panel_btn_x {
+                                st.titlebar_hover_button = Some(3);
+                            } else if mouse_x >= bottom_panel_btn_x {
+                                st.titlebar_hover_button = Some(4);
                             } else {
                                 st.titlebar_hover_button = None;
                             }
@@ -580,7 +731,84 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             false
                         };
 
-                        if old_menu_hover != new_menu_hover || old_hover != new_hover || old_titlebar_hover != new_titlebar_hover || tree_hover_changed || settings_hover_changed {
+                        // 更新 AI 面板快捷操作悬停
+                        let ai_hover_changed = if sidebar_region.contains(mouse_x, mouse_y)
+                            && st.sidebar_content == crate::layout::SidebarContent::AiAssistantPanel
+                        {
+                            let old_hover = st.ai_panel.hover_action;
+                            let rel_x = mouse_x - sidebar_region.x;
+                            let rel_y = mouse_y - sidebar_region.y;
+                            let actions = crate::ai_panel::AiPanel::quick_actions();
+                            let margin = 10.0;
+                            let btn_w = (sidebar_region.width - margin * 2.0 - 8.0) / 2.0;
+                            let btn_h = 28.0;
+                            let btn_gap = 8.0;
+                            let action_start_y = 52.0;
+                            let mut new_hover = None;
+                            for (i, action) in actions.iter().enumerate() {
+                                let col = i % 2;
+                                let row = i / 2;
+                                let bx = margin + col as f32 * (btn_w + btn_gap);
+                                let by = action_start_y + row as f32 * (btn_h + 6.0);
+                                if rel_x >= bx && rel_x < bx + btn_w && rel_y >= by && rel_y < by + btn_h {
+                                    new_hover = Some(*action);
+                                    break;
+                                }
+                            }
+                            st.ai_panel.hover_action = new_hover;
+                            let apply_y = sidebar_region.height - 76.0;
+                            let apply_btn_w = 80.0;
+                            let apply_btn_h = 24.0;
+                            let apply_btn_x = sidebar_region.width - margin - apply_btn_w;
+                            let old_apply_hover = st.ai_panel.hover_apply_button;
+                            st.ai_panel.hover_apply_button = rel_x >= apply_btn_x && rel_x < apply_btn_x + apply_btn_w &&
+                                rel_y >= apply_y && rel_y < apply_y + apply_btn_h;
+                            let apply_hover_changed = old_apply_hover != st.ai_panel.hover_apply_button;
+                            old_hover != new_hover || apply_hover_changed
+                        } else {
+                            let old = st.ai_panel.hover_apply_button;
+                            st.ai_panel.hover_apply_button = false;
+                            old
+                        };
+
+                        // 检测右侧面板拖拽边框（编辑器右边缘）
+                        let editor_region = layout.editor_region();
+                        let right_panel_resize_zone = layout.right_panel_visible &&
+                            (mouse_x >= editor_region.right() - 4.0 && mouse_x <= editor_region.right() + 4.0) &&
+                            mouse_y >= editor_region.y && mouse_y < editor_region.y + editor_region.height;
+
+                        // 检测底部面板拖拽边框（编辑器底部边缘）
+                        let bottom_panel_resize_zone = layout.bottom_panel_visible &&
+                            (mouse_y >= editor_region.bottom() - 4.0 && mouse_y <= editor_region.bottom() + 4.0) &&
+                            mouse_x >= editor_region.x && mouse_x < editor_region.x + editor_region.width;
+
+                        // 设置拖拽光标
+                        if right_panel_resize_zone || st.layout.right_panel_resizing {
+                            let hcursor = windows::Win32::UI::WindowsAndMessaging::LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_SIZEWE).unwrap_or_default();
+                            let _ = windows::Win32::UI::WindowsAndMessaging::SetCursor(hcursor);
+                        } else if bottom_panel_resize_zone || st.layout.bottom_panel_resizing {
+                            let hcursor = windows::Win32::UI::WindowsAndMessaging::LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_SIZENS).unwrap_or_default();
+                            let _ = windows::Win32::UI::WindowsAndMessaging::SetCursor(hcursor);
+                        }
+
+                        // 处理拖拽调整
+                        if is_dragging {
+                            if st.layout.right_panel_resizing {
+                                let delta = mouse_x - editor_region.right();
+                                st.layout.resize_right_panel(-delta);
+                                drop(st);
+                                state.borrow_mut().render();
+                                return LRESULT(0);
+                            } else if st.layout.bottom_panel_resizing {
+                                let delta = mouse_y - editor_region.bottom();
+                                st.layout.resize_bottom_panel(-delta);
+                                drop(st);
+                                state.borrow_mut().render();
+                                return LRESULT(0);
+                            }
+                        }
+
+                        if old_menu_hover != new_menu_hover || old_hover != new_hover || old_titlebar_hover != new_titlebar_hover || tree_hover_changed || settings_hover_changed || ai_hover_changed {
                             drop(st);
                             state.borrow_mut().render();
                         } else if is_dragging {
@@ -590,13 +818,18 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             state.borrow_mut().render();
                         }
                     }
+                    LRESULT(0)
                 });
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
                 EDITOR_STATE.with(|s| {
                     if let Some(state) = s.borrow().as_ref() {
-                        state.borrow_mut().end_selection();
+                        let mut st = state.borrow_mut();
+                        st.end_selection();
+                        // 结束面板拖拽
+                        st.layout.right_panel_resizing = false;
+                        st.layout.bottom_panel_resizing = false;
                     }
                 });
                 LRESULT(0)
@@ -736,7 +969,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         // 终端面板激活时，输入字符进入终端
                         let terminal_active = EDITOR_STATE.with(|s| {
                             s.borrow().as_ref().map(|state| {
-                                state.borrow().sidebar_content == crate::layout::SidebarContent::TerminalPanel
+                                state.borrow().terminal_panel.focused
                             }).unwrap_or(false)
                         });
                         let ssh_dialog_active = EDITOR_STATE.with(|s| {
@@ -766,11 +999,51 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                     state.borrow_mut().render();
                                 }
                             });
+                        } else if EDITOR_STATE.with(|s| {
+                            s.borrow().as_ref().map(|state| {
+                                state.borrow().find_visible && state.borrow().find_focus != crate::editor::FindReplaceFocus::None
+                            }).unwrap_or(false)
+                        }) {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let focus = state.borrow().find_focus;
+                                    match focus {
+                                        crate::editor::FindReplaceFocus::FindQuery => {
+                                            state.borrow_mut().find_query.push(c);
+                                            state.borrow_mut().find_all();
+                                            state.borrow_mut().find_active_index = 0;
+                                            if !state.borrow().find_results.is_empty() {
+                                                let (line, col) = state.borrow().find_results[0];
+                                                state.borrow_mut().cursor_line = line;
+                                                state.borrow_mut().cursor_col = col;
+                                                state.borrow_mut().selection_start = Some((line, col));
+                                                state.borrow_mut().selection_end = Some((line, col + state.borrow().find_query.len()));
+                                            }
+                                        }
+                                        crate::editor::FindReplaceFocus::ReplaceText => {
+                                            state.borrow_mut().replace_text.push(c);
+                                        }
+                                        _ => {}
+                                    }
+                                    state.borrow_mut().render();
+                                }
+                            });
                         } else if terminal_active {
                             EDITOR_STATE.with(|s| {
                                 if let Some(state) = s.borrow().as_ref() {
                                     state.borrow_mut().terminal_panel.input_line.push(c);
                                     state.borrow_mut().terminal_panel.cursor_pos += 1;
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else if EDITOR_STATE.with(|s| {
+                            s.borrow().as_ref().map(|state| {
+                                state.borrow().sidebar_content == crate::layout::SidebarContent::AiAssistantPanel
+                            }).unwrap_or(false)
+                        }) {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    state.borrow_mut().ai_panel.input_char(c);
                                     state.borrow_mut().render();
                                 }
                             });
@@ -948,11 +1221,13 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             return LRESULT(0);
                         }
                         VK_RETURN => {
-                            EDITOR_STATE.with(|s| {
+                            EDITOR_STATE.with(|s| -> LRESULT {
                                 if let Some(state) = s.borrow().as_ref() {
                                     let mut st = state.borrow_mut();
                                     if st.clone_dialog.url.is_empty() {
                                         st.clone_dialog.error_message = Some("请输入仓库 URL".to_string());
+                                        drop(st);
+                                        state.borrow_mut().render();
                                     } else {
                                         let url = st.clone_dialog.url.clone();
                                         drop(st);
@@ -973,10 +1248,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                             state.borrow_mut().render();
                                             return LRESULT(0);
                                         }
+                                        // 文件夹对话框取消
+                                        state.borrow_mut().render();
                                     }
-                                    drop(st);
-                                    state.borrow_mut().render();
                                 }
+                                LRESULT(0)
                             });
                             return LRESULT(0);
                         }
@@ -1173,10 +1449,70 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 }
                             });
                         }
-                        VK_A => {
+                        VK_OEM_3 => {
+                            // Ctrl+` 切换底部终端面板
                             EDITOR_STATE.with(|s| {
                                 if let Some(state) = s.borrow().as_ref() {
-                                    state.borrow_mut().select_all();
+                                    state.borrow_mut().layout.toggle_bottom_panel();
+                                    if state.borrow().layout.bottom_panel_visible && !state.borrow().terminal_panel.running {
+                                        let _ = state.borrow_mut().terminal_panel.start();
+                                    }
+                                    state.borrow_mut().status_message = if state.borrow().layout.bottom_panel_visible { "终端已打开 (Ctrl+` 关闭)" } else { "终端已关闭" }.to_string();
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        }
+                        VK_A => {
+                            if shift {
+                                // Ctrl+Shift+A 切换 AI 面板
+                                EDITOR_STATE.with(|s| {
+                                    if let Some(state) = s.borrow().as_ref() {
+                                        let mut st = state.borrow_mut();
+                                        if st.sidebar_content == crate::layout::SidebarContent::AiAssistantPanel && st.layout.sidebar_visible {
+                                            st.layout.sidebar_visible = false;
+                                            st.status_message = "AI 面板已关闭".to_string();
+                                        } else {
+                                            st.activity_view = crate::layout::ActivityBarView::AiAssistant;
+                                            st.sidebar_content = crate::layout::SidebarContent::AiAssistantPanel;
+                                            st.layout.sidebar_visible = true;
+                                            st.status_message = "AI 面板已打开".to_string();
+                                        }
+                                        st.render();
+                                    }
+                                });
+                            } else {
+                                EDITOR_STATE.with(|s| {
+                                    if let Some(state) = s.borrow().as_ref() {
+                                        state.borrow_mut().select_all();
+                                        state.borrow_mut().render();
+                                    }
+                                });
+                            }
+                        }
+                        VK_F => {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let selected = state.borrow().get_selected_text();
+                                    if shift {
+                                        state.borrow_mut().toggle_replace();
+                                    } else {
+                                        state.borrow_mut().toggle_find();
+                                    }
+                                    // 如果有选中文本，自动填充到查找框
+                                    if let Some(text) = selected {
+                                        if !text.is_empty() && text.len() < 200 {
+                                            state.borrow_mut().find_query = text;
+                                            state.borrow_mut().find_all();
+                                        }
+                                    }
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        }
+                        VK_H => {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    state.borrow_mut().toggle_replace();
                                     state.borrow_mut().render();
                                 }
                             });
@@ -1238,12 +1574,22 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 // 非Ctrl按键
                 let terminal_active = EDITOR_STATE.with(|s| {
                     s.borrow().as_ref().map(|state| {
-                        state.borrow().sidebar_content == crate::layout::SidebarContent::TerminalPanel
+                        state.borrow().terminal_panel.focused
                     }).unwrap_or(false)
                 });
                 let has_selection = |st: &EditorState| {
                     st.selection_start.is_some() && st.selection_end.is_some()
                 };
+                let ai_panel_active = EDITOR_STATE.with(|s| {
+                    s.borrow().as_ref().map(|state| {
+                        state.borrow().sidebar_content == crate::layout::SidebarContent::AiAssistantPanel
+                    }).unwrap_or(false)
+                });
+                let find_active = EDITOR_STATE.with(|s| {
+                    s.borrow().as_ref().map(|state| {
+                        state.borrow().find_visible && state.borrow().find_focus != crate::editor::FindReplaceFocus::None
+                    }).unwrap_or(false)
+                });
                 match vk {
                     VK_RETURN => {
                         if terminal_active {
@@ -1252,6 +1598,31 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                     let input = state.borrow().terminal_panel.input_line.clone();
                                     state.borrow_mut().terminal_panel.push_output(&format!("> {}", input));
                                     state.borrow_mut().terminal_panel.send_enter();
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else if ai_panel_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let settings = state.borrow().app_settings.ai.clone();
+                                    let _ = state.borrow_mut().ai_panel.send_message(&settings);
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else if find_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let focus = state.borrow().find_focus;
+                                    match focus {
+                                        crate::editor::FindReplaceFocus::FindQuery => {
+                                            state.borrow_mut().find_next();
+                                        }
+                                        crate::editor::FindReplaceFocus::ReplaceText => {
+                                            state.borrow_mut().replace_current();
+                                            state.borrow_mut().find_next();
+                                        }
+                                        _ => {}
+                                    }
                                     state.borrow_mut().render();
                                 }
                             });
@@ -1278,6 +1649,30 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                     st.render();
                                 }
                             });
+                        } else if ai_panel_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    state.borrow_mut().ai_panel.backspace();
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else if find_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let focus = state.borrow().find_focus;
+                                    match focus {
+                                        crate::editor::FindReplaceFocus::FindQuery => {
+                                            state.borrow_mut().find_query.pop();
+                                            state.borrow_mut().find_all();
+                                        }
+                                        crate::editor::FindReplaceFocus::ReplaceText => {
+                                            state.borrow_mut().replace_text.pop();
+                                        }
+                                        _ => {}
+                                    }
+                                    state.borrow_mut().render();
+                                }
+                            });
                         } else {
                             EDITOR_STATE.with(|s| {
                                 if let Some(state) = s.borrow().as_ref() {
@@ -1301,6 +1696,26 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 } else {
                                     state.borrow_mut().delete_forward();
                                 }
+                                state.borrow_mut().render();
+                            }
+                        });
+                    }
+                    VK_F3 => {
+                        EDITOR_STATE.with(|s| {
+                            if let Some(state) = s.borrow().as_ref() {
+                                if shift {
+                                    state.borrow_mut().find_prev();
+                                } else {
+                                    state.borrow_mut().find_next();
+                                }
+                                state.borrow_mut().render();
+                            }
+                        });
+                    }
+                    VK_ESCAPE => {
+                        EDITOR_STATE.with(|s| {
+                            if let Some(state) = s.borrow().as_ref() {
+                                state.borrow_mut().close_find_replace();
                                 state.borrow_mut().render();
                             }
                         });
@@ -1426,14 +1841,38 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         });
                     }
                     VK_TAB => {
-                        EDITOR_STATE.with(|s| {
-                            if let Some(state) = s.borrow().as_ref() {
-                                let has_sel = has_selection(&state.borrow());
-                                if has_sel { state.borrow_mut().delete_selection(); }
-                                state.borrow_mut().insert_char('\t');
-                                state.borrow_mut().render();
-                            }
-                        });
+                        if find_active {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let focus = state.borrow().find_focus;
+                                    let replace_visible = state.borrow().replace_visible;
+                                    let new_focus = match focus {
+                                        crate::editor::FindReplaceFocus::FindQuery => {
+                                            if replace_visible {
+                                                crate::editor::FindReplaceFocus::ReplaceText
+                                            } else {
+                                                crate::editor::FindReplaceFocus::FindQuery
+                                            }
+                                        }
+                                        crate::editor::FindReplaceFocus::ReplaceText => {
+                                            crate::editor::FindReplaceFocus::FindQuery
+                                        }
+                                        _ => crate::editor::FindReplaceFocus::FindQuery,
+                                    };
+                                    state.borrow_mut().find_focus = new_focus;
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        } else {
+                            EDITOR_STATE.with(|s| {
+                                if let Some(state) = s.borrow().as_ref() {
+                                    let has_sel = has_selection(&state.borrow());
+                                    if has_sel { state.borrow_mut().delete_selection(); }
+                                    state.borrow_mut().insert_tab();
+                                    state.borrow_mut().render();
+                                }
+                            });
+                        }
                     }
                     _ => {}
                 }
