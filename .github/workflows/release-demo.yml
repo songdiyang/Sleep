@@ -1,0 +1,144 @@
+name: Release Demo Version
+
+on:
+  # 手动触发发布
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (留空则自动生成 vYYYY.MM.DD-build)'
+        required: false
+        default: ''
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout dev branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Collect version info
+        id: version
+        shell: bash
+        run: |
+          # 如果手动输入了版本号则使用，否则自动生成
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            DATE_VERSION=$(date +%Y.%m.%d)
+            BUILD=1
+            while gh release view "v${DATE_VERSION}-${BUILD}" &>/dev/null; do
+              BUILD=$((BUILD + 1))
+            done
+            VERSION="v${DATE_VERSION}-${BUILD}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "date=$(date +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          echo "Generated version: $VERSION"
+
+      - name: Collect features from dev
+        id: features
+        shell: bash
+        run: |
+          echo "## 📋 版本特性更新" > /tmp/release_notes.md
+          echo "" >> /tmp/release_notes.md
+          
+          if [ -d .github/features ] && [ "$(ls -A .github/features/*.md 2>/dev/null)" ]; then
+            FEATURE_FILES=$(ls -1 .github/features/*.md 2>/dev/null | sort)
+            echo "$FEATURE_FILES" | while read file; do
+              PR_NUM=$(echo "$file" | grep -oE 'PR[0-9]+' | sed 's/PR//')
+              echo "### PR #$PR_NUM" >> /tmp/release_notes.md
+              sed -n '/## 更新的特性/,/## /p' "$file" | head -n -1 | tail -n +2 >> /tmp/release_notes.md
+              echo "" >> /tmp/release_notes.md
+            done
+            FEATURE_COUNT=$(echo "$FEATURE_FILES" | wc -l)
+            echo "count=$FEATURE_COUNT" >> $GITHUB_OUTPUT
+          else
+            echo "本次更新包含常规维护和改进。" >> /tmp/release_notes.md
+            echo "count=0" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "" >> /tmp/release_notes.md
+          echo "---" >> /tmp/release_notes.md
+          echo "" >> /tmp/release_notes.md
+          echo "**构建时间**: ${{ steps.version.outputs.date }}" >> /tmp/release_notes.md
+          echo "**提交**: ${{ github.sha }}" >> /tmp/release_notes.md
+          
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/release_notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build Release EXE
+        run: |
+          cargo build --release --bin aether-app
+          
+      - name: Prepare release asset
+        run: |
+          mkdir -p release
+          cp target/x86_64-pc-windows-msvc/release/aether-app.exe release/aether-app.exe
+          
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const notes = `${{ steps.features.outputs.notes }}`;
+            const count = '${{ steps.features.outputs.count }}';
+            
+            // 创建 release
+            const { data: release } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: version,
+              name: `Aether Editor ${version}`,
+              body: notes,
+              draft: false,
+              prerelease: true
+            });
+            
+            console.log(`Created release: ${release.html_url}`);
+            
+            // 上传 exe 文件
+            const fs = require('fs');
+            const path = require('path');
+            const exePath = path.join(process.cwd(), 'release', 'aether-app.exe');
+            const exeData = fs.readFileSync(exePath);
+            
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id,
+              name: 'aether-app.exe',
+              data: exeData,
+              headers: {
+                'content-type': 'application/octet-stream',
+                'content-length': exeData.length
+              }
+            });
+            
+            console.log('Uploaded aether-app.exe');
+            
+            // 创建评论到 commit
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: `🎉 **Release ${version} 已发布！**\n\n- 包含 ${count} 个特性更新\n- 下载: [aether-app.exe](${release.html_url})\n- 版本号: \`${version}\``
+            });
+
+      - name: Clean up feature records
+        if: success()
+        shell: bash
+        run: |
+          rm -rf .github/features
+          mkdir -p .github/features
+          git add .github/features/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: clear feature records after release ${{ steps.version.outputs.version }}"
+          git push origin dev

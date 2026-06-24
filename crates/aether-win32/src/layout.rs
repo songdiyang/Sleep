@@ -29,53 +29,58 @@ impl Region {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityBarView {
     Explorer,
-    Search,
     SourceControl,
-    RunDebug,
-    Extensions,
+    Terminal,
+    Settings,
+    AiAssistant,
 }
 
 impl ActivityBarView {
     pub fn label(&self) -> &'static str {
         match self {
             ActivityBarView::Explorer => "资源管理器",
-            ActivityBarView::Search => "搜索",
             ActivityBarView::SourceControl => "源代码管理",
-            ActivityBarView::RunDebug => "运行和调试",
-            ActivityBarView::Extensions => "扩展",
+            ActivityBarView::Terminal => "终端",
+            ActivityBarView::Settings => "设置",
+            ActivityBarView::AiAssistant => "AI 助手",
         }
     }
 
     pub fn icon(&self) -> &'static str {
         match self {
             ActivityBarView::Explorer => "📁",
-            ActivityBarView::Search => "🔍",
             ActivityBarView::SourceControl => "🌿",
-            ActivityBarView::RunDebug => "▶",
-            ActivityBarView::Extensions => "🧩",
+            ActivityBarView::Terminal => "⌨",
+            ActivityBarView::Settings => "⚙",
+            ActivityBarView::AiAssistant => "🤖",
         }
     }
 }
 
 /// 侧边栏内容类型
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SidebarContent {
     FileTree,
-    SearchPanel,
     SourceControlPanel,
-    RunDebugPanel,
-    ExtensionsPanel,
+    TerminalPanel,
+    SettingsPanel,
+    RemoteFileTree,
+    AiAssistantPanel,
 }
 
 impl SidebarContent {
     pub fn from_view(view: ActivityBarView) -> Self {
         match view {
             ActivityBarView::Explorer => SidebarContent::FileTree,
-            ActivityBarView::Search => SidebarContent::SearchPanel,
             ActivityBarView::SourceControl => SidebarContent::SourceControlPanel,
-            ActivityBarView::RunDebug => SidebarContent::RunDebugPanel,
-            ActivityBarView::Extensions => SidebarContent::ExtensionsPanel,
+            ActivityBarView::Terminal => SidebarContent::TerminalPanel,
+            ActivityBarView::Settings => SidebarContent::SettingsPanel,
+            ActivityBarView::AiAssistant => SidebarContent::AiAssistantPanel,
         }
+    }
+
+    pub fn is_ai_assistant(&self) -> bool {
+        matches!(self, SidebarContent::AiAssistantPanel)
     }
 }
 
@@ -110,6 +115,8 @@ pub struct LayoutManager {
     pub right_panel_visible: bool,
     pub bottom_panel_visible: bool,
     pub status_bar_visible: bool,
+    pub right_panel_resizing: bool,
+    pub bottom_panel_resizing: bool,
 }
 
 impl LayoutManager {
@@ -131,6 +138,8 @@ impl LayoutManager {
             right_panel_visible: false,
             bottom_panel_visible: false,
             status_bar_visible: true,
+            right_panel_resizing: false,
+            bottom_panel_resizing: false,
         }
     }
 
@@ -281,6 +290,18 @@ impl LayoutManager {
         self.sidebar_width = new_width;
     }
 
+    /// 调整右侧面板宽度
+    pub fn resize_right_panel(&mut self, delta: f32) {
+        let new_width = (self.right_panel_width + delta).max(0.0);
+        self.right_panel_width = new_width;
+    }
+
+    /// 调整底部面板高度
+    pub fn resize_bottom_panel(&mut self, delta: f32) {
+        let new_height = (self.bottom_panel_height + delta).max(0.0);
+        self.bottom_panel_height = new_height;
+    }
+
     /// 切换侧边栏可见性
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_visible = !self.sidebar_visible;
@@ -300,5 +321,25 @@ impl LayoutManager {
     pub fn resize_window(&mut self, width: f32, height: f32) {
         self.window_width = width;
         self.window_height = height;
+    }
+
+    /// 切换底部面板可见性
+    pub fn toggle_bottom_panel(&mut self) {
+        self.bottom_panel_visible = !self.bottom_panel_visible;
+        if self.bottom_panel_visible {
+            self.bottom_panel_height = 200.0;
+        } else {
+            self.bottom_panel_height = 0.0;
+        }
+    }
+
+    /// 切换右侧面板可见性
+    pub fn toggle_right_panel(&mut self) {
+        self.right_panel_visible = !self.right_panel_visible;
+        if self.right_panel_visible {
+            self.right_panel_width = 300.0;
+        } else {
+            self.right_panel_width = 0.0;
+        }
     }
 }

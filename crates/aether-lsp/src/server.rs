@@ -55,6 +55,7 @@ impl LanguageServer {
     }
 
     /// 发送 initialize 请求并等待响应
+    #[allow(deprecated)]
     async fn initialize(&mut self) -> std::io::Result<()> {
         let root_uri = self.config.root_uri.clone().unwrap_or_else(|| {
             Url::parse("file:///").unwrap()
@@ -64,6 +65,10 @@ impl LanguageServer {
             process_id: Some(std::process::id() as u32),
             root_path: None,
             root_uri: Some(root_uri.clone()),
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: root_uri.clone(),
+                name: self.config.root_uri.as_ref().map(|u| u.path().to_string()).unwrap_or_default(),
+            }]),
             initialization_options: self.config.initialization_options.clone(),
             capabilities: ClientCapabilities {
                 workspace: Some(WorkspaceClientCapabilities {
@@ -192,7 +197,6 @@ impl LanguageServer {
                 ..Default::default()
             },
             trace: None,
-            workspace_folders: None,
             client_info: Some(ClientInfo {
                 name: "Aether".to_string(),
                 version: Some("0.1.0".to_string()),

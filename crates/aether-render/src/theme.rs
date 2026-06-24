@@ -17,6 +17,15 @@ pub struct Theme {
     pub tab_active_bg: D2D1_COLOR_F,
     pub tab_inactive_bg: D2D1_COLOR_F,
     pub text_default: D2D1_COLOR_F,
+    // Glass effect additions
+    pub titlebar_bg: D2D1_COLOR_F,
+    pub activity_bar_bg: D2D1_COLOR_F,
+    pub panel_border: D2D1_COLOR_F,
+    pub shadow: D2D1_COLOR_F,
+    pub glow_selection: D2D1_COLOR_F,
+    pub command_palette_bg: D2D1_COLOR_F,
+    pub submenu_bg: D2D1_COLOR_F,
+    pub glass_enabled: bool,
     pub syntax: SyntaxColors,
 }
 
@@ -88,6 +97,15 @@ impl Theme {
             tab_active_bg: colors::tab_active(),
             tab_inactive_bg: colors::tab_inactive(),
             text_default: colors::text_default(),
+            // Glass effect fields — opaque fallback values
+            titlebar_bg: color_f(0.137, 0.137, 0.137, 1.0),
+            activity_bar_bg: color_f(0.137, 0.137, 0.137, 1.0),
+            panel_border: color_f(0.2, 0.2, 0.2, 1.0),
+            shadow: color_f(0.0, 0.0, 0.0, 0.0),
+            glow_selection: color_f(0.18, 0.36, 0.55, 1.0),
+            command_palette_bg: color_f(0.18, 0.18, 0.18, 1.0),
+            submenu_bg: color_f(0.18, 0.18, 0.18, 1.0),
+            glass_enabled: false,
             syntax: SyntaxColors {
                 keyword: colors::keyword(),
                 string: colors::string(),
@@ -111,6 +129,92 @@ impl Theme {
                 toml_table: color_f(0.8, 0.5, 0.3, 1.0),
                 find_highlight: color_f(0.8, 0.7, 0.3, 0.6),
                 // Semantic token colors (P2) - 默认映射
+                semantic_namespace: color_f(0.5, 0.7, 0.9, 1.0),
+                semantic_type: color_f(0.3, 0.7, 0.9, 1.0),
+                semantic_class: color_f(0.3, 0.6, 0.9, 1.0),
+                semantic_enum: color_f(0.3, 0.6, 0.9, 1.0),
+                semantic_interface: color_f(0.3, 0.7, 0.8, 1.0),
+                semantic_struct: color_f(0.3, 0.6, 0.9, 1.0),
+                semantic_type_parameter: color_f(0.4, 0.7, 0.8, 1.0),
+                semantic_parameter: color_f(0.7, 0.7, 0.7, 1.0),
+                semantic_variable_local: color_f(0.8, 0.8, 0.8, 1.0),
+                semantic_variable_global: color_f(0.7, 0.7, 0.8, 1.0),
+                semantic_property: color_f(0.7, 0.7, 0.8, 1.0),
+                semantic_enum_member: color_f(0.5, 0.7, 0.9, 1.0),
+                semantic_event: color_f(0.7, 0.5, 0.7, 1.0),
+                semantic_function_declaration: color_f(0.8, 0.6, 0.3, 1.0),
+                semantic_function_call: color_f(0.8, 0.6, 0.3, 1.0),
+                semantic_method: color_f(0.8, 0.6, 0.3, 1.0),
+                semantic_macro: color_f(0.6, 0.4, 0.8, 1.0),
+                semantic_keyword_control: color_f(0.5, 0.5, 0.8, 1.0),
+                semantic_modifier: color_f(0.5, 0.5, 0.8, 1.0),
+                semantic_comment_doc: color_f(0.4, 0.6, 0.4, 1.0),
+                semantic_string_format: color_f(0.8, 0.6, 0.4, 1.0),
+                semantic_number_hex: color_f(0.6, 0.8, 0.6, 1.0),
+                semantic_regexp: color_f(0.8, 0.5, 0.3, 1.0),
+                semantic_operator_logical: color_f(0.5, 0.5, 0.8, 1.0),
+                semantic_readonly: color_f(0.5, 0.7, 0.9, 1.0),
+                semantic_deprecated: color_f(0.5, 0.5, 0.5, 0.7),
+                semantic_async: color_f(0.5, 0.5, 0.8, 1.0),
+                semantic_static: color_f(0.7, 0.7, 0.7, 1.0),
+                semantic_abstract: color_f(0.5, 0.7, 0.8, 1.0),
+            },
+        }
+    }
+
+    /// 毛玻璃主题（Apple-level Acrylic）
+    /// 半透明面板 + 柔和边框 + 光晕选择效果
+    pub fn glass() -> Self {
+        Self {
+            // 编辑器区域：非常微妙的半透明，确保文本可读性
+            editor_bg: color_f(0.118, 0.118, 0.118, 0.95),      // #1E1E1E @ 95%
+            line_highlight_bg: color_f(0.15, 0.15, 0.15, 0.90),  // 当前行高亮，半透明
+            line_number_fg: color_f(0.52, 0.52, 0.52, 1.0),       // 行号保持完全不透明，确保可读
+            line_number_bg: color_f(0.118, 0.118, 0.118, 0.95),  // 行号背景与编辑器一致
+            // 选择高亮：柔和蓝色光晕
+            selection_bg: color_f(0.25, 0.50, 0.75, 0.50),        // 半透明白光晕
+            cursor_color: color_f(0.8, 0.8, 0.8, 1.0),            // 光标保持不透明
+            // 侧边栏：半透明，让背后内容轻微透出
+            sidebar_bg: color_f(0.145, 0.145, 0.149, 0.80),       // #252526 @ 80%
+            // 状态栏：半透明活跃强调色
+            statusbar_bg: color_f(0.0, 0.478, 0.8, 0.70),         // #007ACC @ 70%
+            // 标签栏
+            tab_active_bg: color_f(0.145, 0.145, 0.149, 0.85),   // 活跃标签稍亮
+            tab_inactive_bg: color_f(0.118, 0.118, 0.118, 0.70), // 非活跃标签更透明
+            // 文本始终不透明，保证可读性
+            text_default: color_f(0.83, 0.83, 0.83, 1.0),        // #D4D4D4
+            // Glass-specific additions
+            titlebar_bg: color_f(0.118, 0.118, 0.118, 0.85),     // 标题栏半透明暗色
+            activity_bar_bg: color_f(0.118, 0.118, 0.118, 0.80), // 活动栏半透明
+            panel_border: color_f(1.0, 1.0, 1.0, 0.06),          // 柔和白色边框
+            shadow: color_f(0.0, 0.0, 0.0, 0.25),                // 柔和阴影
+            glow_selection: color_f(0.2, 0.5, 0.8, 0.45),        // 柔和蓝色光晕
+            command_palette_bg: color_f(0.18, 0.18, 0.18, 0.92),  // 命令面板
+            submenu_bg: color_f(0.20, 0.20, 0.20, 0.92),         // 子菜单
+            glass_enabled: true,
+            syntax: SyntaxColors {
+                keyword: color_f(0.77, 0.52, 0.75, 1.0),
+                string: color_f(0.81, 0.57, 0.47, 1.0),
+                number: color_f(0.71, 0.81, 0.66, 1.0),
+                comment: color_f(0.42, 0.60, 0.33, 1.0),
+                function: color_f(0.86, 0.86, 0.67, 1.0),
+                type_name: color_f(0.31, 0.79, 0.69, 1.0),
+                operator: color_f(0.83, 0.83, 0.83, 1.0),
+                variable: color_f(0.61, 0.74, 1.0, 1.0),
+                preprocessor: color_f(0.50, 0.50, 0.50, 1.0),
+                attribute: color_f(0.8, 0.6, 0.3, 1.0),
+                macro_color: color_f(0.6, 0.4, 0.8, 1.0),
+                lifetime: color_f(0.5, 0.7, 0.9, 1.0),
+                regex: color_f(0.8, 0.5, 0.3, 1.0),
+                format_string: color_f(0.8, 0.6, 0.4, 1.0),
+                md_heading: color_f(0.3, 0.6, 0.9, 1.0),
+                md_link: color_f(0.3, 0.5, 0.9, 1.0),
+                md_code: color_f(0.7, 0.5, 0.3, 1.0),
+                md_emphasis: color_f(0.9, 0.7, 0.4, 1.0),
+                json_key: color_f(0.6, 0.8, 0.9, 1.0),
+                toml_table: color_f(0.8, 0.5, 0.3, 1.0),
+                find_highlight: color_f(0.8, 0.7, 0.3, 0.6),
+                // Semantic token colors — same as dark, text stays opaque
                 semantic_namespace: color_f(0.5, 0.7, 0.9, 1.0),
                 semantic_type: color_f(0.3, 0.7, 0.9, 1.0),
                 semantic_class: color_f(0.3, 0.6, 0.9, 1.0),
@@ -206,6 +310,6 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::dark()
+        Self::glass()
     }
 }

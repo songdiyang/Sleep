@@ -17,6 +17,10 @@ pub struct PieceTable {
     pieces: Vec<Piece>,
     /// 行索引：行起始位置 → 片段索引+偏移
     line_index: LineIndex,
+    /// piece 起始字节偏移前缀和缓存：`piece_offset_cache[i]` = 第 i 个 piece 的起始字节偏移
+    /// `piece_offset_cache[pieces.len()]` = 总字节数
+    /// O(1) 替代 `byte_offset_of_piece` 的 O(n) 累积求和
+    piece_offset_cache: Vec<usize>,
     /// 总字符数（UTF-8 codepoints，缓存）
     len_chars: usize,
     /// 总行数（缓存，增量更新）
@@ -99,6 +103,7 @@ impl PieceTable {
             add_buffer: text.into_bytes(),
             pieces,
             line_index: LineIndex::new(),
+            piece_offset_cache: Vec::new(),
             len_chars: 0, // 简化：按字节计数
             len_lines: line_breaks as usize + 1,
             edit_count: 0,
@@ -125,6 +130,7 @@ impl PieceTable {
             add_buffer: Vec::new(),
             pieces,
             line_index: LineIndex::new(),
+            piece_offset_cache: Vec::new(),
             len_chars: len,
             len_lines: line_breaks as usize + 1,
             edit_count: 0,
@@ -169,6 +175,8 @@ impl PieceTable {
             if self.edit_count >= self.coalesce_threshold {
                 self.coalesce_pieces();
                 self.edit_count = 0;
+            } else {
+                self.rebuild_piece_offset_cache();
             }
             let end_line = self.len_lines.saturating_sub(1);
             return EditResult::new(start_line, end_line, line_breaks as isize);
@@ -221,6 +229,8 @@ impl PieceTable {
         if self.edit_count >= self.coalesce_threshold {
             self.coalesce_pieces();
             self.edit_count = 0;
+        } else {
+            self.rebuild_piece_offset_cache();
         }
         let end_line = (start_line + line_breaks as usize).min(self.len_lines.saturating_sub(1));
         EditResult::new(start_line, end_line, line_breaks as isize)
@@ -309,6 +319,8 @@ impl PieceTable {
         if self.edit_count >= self.coalesce_threshold {
             self.coalesce_pieces();
             self.edit_count = 0;
+        } else {
+            self.rebuild_piece_offset_cache();
         }
         let line_delta = self.len_lines as isize - old_lines as isize;
         let end_line = end_line_before.min(self.len_lines.saturating_sub(1));
@@ -355,17 +367,18 @@ impl PieceTable {
     }
 
     /// 获取指定行的文本（不包含换行符）
+    /// 优化：优先使用零拷贝的 get_line_bytes，避免跨 piece 时的额外分配
     pub fn get_line(&self, line_idx: usize) -> Option<String> {
         let bytes = self.get_line_bytes(line_idx)?;
         if bytes.is_empty() {
+            // 跨 piece 情况：回退到 get_text
             let (start_byte, end_byte) = self.line_byte_range(line_idx)?;
             let text = self.get_text(start_byte, end_byte);
-            // 去掉末尾的换行符
-            return Some(text.strip_suffix('\n').unwrap_or(&text).to_string());
+            return Some(text.strip_suffix('\n').map(|s| s.to_string()).unwrap_or(text));
         }
+        // 零拷贝路径：直接从 bytes 构建 String，避免 Cow 中间层
         let text = String::from_utf8_lossy(bytes);
-        // 去掉末尾的换行符
-        Some(text.strip_suffix('\n').unwrap_or(&text).to_string())
+        Some(text.strip_suffix('\n').map(|s| s.to_string()).unwrap_or_else(|| text.into_owned()))
     }
 
     /// 获取所有文本
@@ -431,16 +444,15 @@ impl PieceTable {
         self.pieces.len().saturating_sub(1)
     }
 
-    /// 计算指定piece之前的字节偏移
+    /// 计算指定piece之前的字节偏移 —— O(1) 前缀和查找
     fn byte_offset_of_piece(&self, piece_idx: usize) -> usize {
-        // 累积和缓存：存储piece索引到字节偏移的映射
-        // 对于频繁访问的piece，使用二分查找优化
-        if piece_idx == 0 {
-            return 0;
+        if !self.piece_offset_cache.is_empty() {
+            // O(1) 前缀和查找
+            self.piece_offset_cache[piece_idx]
+        } else {
+            // 回退：缓存未构建时累积求和
+            self.pieces[..piece_idx].iter().map(|p| p.len).sum()
         }
-        // 使用前缀和数组会更快，但这里用简单的累积求和
-        // 因为piece数量通常在几十到几百个
-        self.pieces[..piece_idx].iter().map(|p| p.len).sum()
     }
 
     /// 获取指定行的字节范围 [start, end)
@@ -482,6 +494,23 @@ impl PieceTable {
 
         self.line_index.clear();
         self.line_index.line_starts = line_starts;
+
+        // 同步重建 piece 偏移前缀和缓存
+        self.rebuild_piece_offset_cache();
+    }
+
+    /// 重建 piece 起始字节偏移前缀和缓存
+    /// `piece_offset_cache[i]` = 第 i 个 piece 的起始字节偏移
+    fn rebuild_piece_offset_cache(&mut self) {
+        self.piece_offset_cache.clear();
+        self.piece_offset_cache.reserve(self.pieces.len() + 1);
+        let mut offset = 0usize;
+        for piece in &self.pieces {
+            self.piece_offset_cache.push(offset);
+            offset += piece.len;
+        }
+        // 额外存储总字节数，方便后续使用
+        self.piece_offset_cache.push(offset);
     }
 
     /// 增量更新行索引 - 在指定字节位置插入文本后更新
@@ -922,6 +951,9 @@ impl PieceTable {
                 i += 1;
             }
         }
+
+        // 合并后重建前缀和缓存
+        self.rebuild_piece_offset_cache();
     }
 
     /// 延迟重建行索引 - 批量编辑时减少重建次数

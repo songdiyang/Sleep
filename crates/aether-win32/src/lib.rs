@@ -1,3 +1,6 @@
+pub mod dirty_rect;
+pub mod render_context;
+
 pub mod window;
 pub mod input;
 pub mod dialogs;
@@ -14,4 +17,9 @@ pub mod command_palette;
 pub mod git;
 pub mod uia;
 pub mod ime;
+pub mod ssh;
 pub mod terminal;
+pub mod theme;
+pub mod settings;
+pub mod ai_panel;
+pub mod logging;

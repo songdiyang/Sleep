@@ -152,6 +152,22 @@ impl Theme {
         if let Some(tab_i) = vscode.colors.get("tab.inactiveBackground") {
             theme.tab_inactive_bg = parse_hex_color(tab_i).unwrap_or(theme.tab_inactive_bg);
         }
+        // Glass theme extensions (optional VS Code keys)
+        if let Some(tb) = vscode.colors.get("titleBar.activeBackground") {
+            theme.titlebar_bg = parse_hex_color(tb).unwrap_or(theme.titlebar_bg);
+        }
+        if let Some(ab) = vscode.colors.get("activityBar.background") {
+            theme.activity_bar_bg = parse_hex_color(ab).unwrap_or(theme.activity_bar_bg);
+        }
+        if let Some(pb) = vscode.colors.get("sideBar.border") {
+            theme.panel_border = parse_hex_color(pb).unwrap_or(theme.panel_border);
+        }
+        if let Some(cp) = vscode.colors.get("dropdown.background") {
+            theme.command_palette_bg = parse_hex_color(cp).unwrap_or(theme.command_palette_bg);
+        }
+        if let Some(mb) = vscode.colors.get("menu.background") {
+            theme.submenu_bg = parse_hex_color(mb).unwrap_or(theme.submenu_bg);
+        }
 
         // 解析 tokenColors 映射到 SyntaxColors
         theme.syntax = parse_syntax_colors(&vscode.token_colors);

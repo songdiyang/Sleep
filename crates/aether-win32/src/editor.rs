@@ -8,8 +8,7 @@ use aether_core::buffer::piece_table::PieceTable;
 use aether_core::buffer::text_buffer::MultiCursorState;
 use aether_core::lexer::{Language, LexemeSpan};
 use aether_core::workspace::file_tree::{FileKind, FileTree};
-use aether_render::d2d::brush_cache::{BrushCache, TextFormatCache};
-use aether_render::d2d::factory::{D2DFactory, RenderTarget};
+use aether_render::d2d::factory::D2DFactory;
 use aether_render::d2d::text::TextRenderer;
 use aether_render::theme::Theme;
 
@@ -22,12 +21,25 @@ use crate::status_bar::StatusBar;
 use crate::tabs::{Tab, TabLayout};
 use crate::command_palette::CommandPalette;
 use crate::git::GitIntegration;
+use crate::ssh::{SshConnectionDialog, RemoteSession, RemoteFileTree, CloneRepoDialog};
+use crate::terminal::TerminalPanel;
+use crate::ai_panel::AiPanel;
+use aether_shared::settings::AppSettings;
+use crate::settings::SettingsPanel;
+
+/// 查找替换焦点状态
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindReplaceFocus {
+    None,
+    FindQuery,
+    ReplaceText,
+}
 
 /// 编辑器应用状态
 pub struct EditorState {
     pub hwnd: HWND,
     pub d2d_factory: D2DFactory,
-    pub render_target: Option<RenderTarget>,
+    pub render_ctx: crate::render_context::RenderContext,
     pub text_renderer: TextRenderer,
     pub theme: Theme,
     // 当前活动标签页的编辑状态（直接字段，零开销访问）
@@ -48,6 +60,10 @@ pub struct EditorState {
     pub(crate) line_cache_versions: Vec<u64>,
     /// 全局编辑版本号，用于行级缓存失效
     pub(crate) buffer_version: u64,
+    /// 行号 UTF-16 预缓存（避免每帧 format! + encode_utf16 分配）
+    pub(crate) cached_line_numbers: Vec<Vec<u16>>,
+    /// 可复用的 UTF-16 文本缓冲区（避免 render_editor 中每 token 分配 Vec<u16>）
+    pub(crate) text_utf16_buf: Vec<u16>,
     // 当前语言
     pub(crate) language: Language,
     /// 标签页系统（后台存储，切换时同步）
@@ -66,6 +82,11 @@ pub struct EditorState {
     pub replace_text: String,
     pub find_results: Vec<(usize, usize)>, // (line, col) 匹配位置列表
     pub find_active_index: usize,
+    /// 查找替换焦点状态
+    pub find_focus: FindReplaceFocus,
+    /// 查找缓存：避免查询未变时重复全量扫描
+    last_find_query: String,
+    find_result_version: u64,
     // 全局 UI 状态
     pub file_tree: Option<FileTree>,
     pub current_folder: Option<PathBuf>,
@@ -90,10 +111,24 @@ pub struct EditorState {
     pub multi_cursor: MultiCursorState,
     /// Git 集成
     pub git: GitIntegration,
-    /// D2D 画刷缓存
-    pub brush_cache: BrushCache,
-    /// DirectWrite 文本格式缓存
-    pub text_format_cache: TextFormatCache,
+    /// 终端面板
+    pub terminal_panel: TerminalPanel,
+    /// AI 助手面板
+    pub ai_panel: AiPanel,
+    /// SSH 连接对话框
+    pub ssh_dialog: SshConnectionDialog,
+    /// 远程会话
+    pub remote_session: Option<RemoteSession>,
+    /// 远程文件树
+    pub remote_file_tree: Option<RemoteFileTree>,
+    /// 选中的远程文件节点
+    pub selected_remote_node: Option<usize>,
+    /// 悬停的远程文件节点
+    pub hover_remote_node: Option<usize>,
+    /// 远程文件树滚动偏移
+    pub remote_scroll_y: f32,
+    /// 克隆仓库对话框
+    pub clone_dialog: CloneRepoDialog,
     /// 窗口是否最大化
     pub is_maximized: bool,
     /// 标题栏按钮悬停状态 (0=最小化, 1=最大化, 2=关闭)
@@ -102,6 +137,34 @@ pub struct EditorState {
     pub selected_file_node: Option<u32>,
     /// 文件树中鼠标悬停的节点索引
     pub hover_file_node: Option<u32>,
+    /// 侧边栏滚动偏移（用于文件树虚拟滚动）
+    pub sidebar_scroll_y: f32,
+    /// 应用设置
+    pub app_settings: aether_shared::settings::AppSettings,
+    /// 设置面板
+    pub settings_panel: crate::settings::SettingsPanel,
+    /// Git 面板
+    pub git_panel: crate::git::GitIntegration,
+    /// 脏矩形追踪器（用于局部重绘优化）
+    pub dirty_tracker: crate::dirty_rect::DirtyRectTracker,
+    /// 上一帧的光标位置（用于检测光标移动）
+    pub last_cursor_line: usize,
+    /// 上一帧的光标列（用于检测光标移动）
+    pub last_cursor_col: usize,
+    /// 上一帧的滚动位置（用于检测滚动变化）
+    pub last_scroll_y: f32,
+    /// 上一帧的选择状态（用于检测选择变化）
+    pub last_selection_start: Option<(usize, usize)>,
+    /// 上一帧的选择结束（用于检测选择变化）
+    pub last_selection_end: Option<(usize, usize)>,
+    /// 上一帧的侧边栏内容类型（用于检测侧边栏变化）
+    pub last_sidebar_content: crate::layout::SidebarContent,
+    /// 上一帧的右侧面板可见性（用于检测右侧面板变化）
+    pub last_right_panel_visible: bool,
+    /// 上一帧的底部面板可见性（用于检测底部面板变化）
+    pub last_bottom_panel_visible: bool,
+    /// 上一帧的状态消息（用于检测状态栏变化）
+    pub last_status_message: String,
 }
 
 impl EditorState {
@@ -279,14 +342,15 @@ impl EditorState {
     pub fn new(hwnd: HWND) -> Result<Self> {
         let d2d_factory = D2DFactory::new()?;
         let text_renderer = TextRenderer::new()?;
-        let theme = Theme::dark();
+        let theme = Theme::glass();
         let buffer = PieceTable::from_string(String::new());
         let key_map = KeyMap::new();
+        let app_settings = AppSettings::load();
 
         let mut state = Self {
             hwnd,
             d2d_factory,
-            render_target: None,
+            render_ctx: crate::render_context::RenderContext::new(),
             text_renderer,
             theme,
             buffer,
@@ -303,6 +367,8 @@ impl EditorState {
             cached_tokens: Vec::new(),
             line_cache_versions: Vec::new(),
             buffer_version: 0,
+            cached_line_numbers: Vec::new(),
+            text_utf16_buf: Vec::with_capacity(256),
             language: Language::PlainText,
             tabs: Vec::new(),
             active_tab: 0,
@@ -315,6 +381,9 @@ impl EditorState {
             replace_text: String::new(),
             find_results: Vec::new(),
             find_active_index: 0,
+            find_focus: FindReplaceFocus::None,
+            last_find_query: String::new(),
+            find_result_version: 0,
             file_tree: None,
             current_folder: None,
             status_message: "就绪".to_string(),
@@ -332,12 +401,33 @@ impl EditorState {
             command_palette: CommandPalette::new(),
             multi_cursor: MultiCursorState::new(),
             git: GitIntegration::new(),
-            brush_cache: BrushCache::new(),
-            text_format_cache: TextFormatCache::new().unwrap_or_else(|_| TextFormatCache::new().unwrap()),
+            terminal_panel: TerminalPanel::new(),
+            ai_panel: AiPanel::new(),
+            settings_panel: SettingsPanel::from_settings(&app_settings),
+            app_settings,
+            ssh_dialog: SshConnectionDialog::new(),
+            remote_session: None,
+            remote_file_tree: None,
+            selected_remote_node: None,
+            hover_remote_node: None,
+            remote_scroll_y: 0.0,
+            clone_dialog: CloneRepoDialog::new(),
             is_maximized: false,
             titlebar_hover_button: None,
             selected_file_node: None,
             hover_file_node: None,
+            sidebar_scroll_y: 0.0,
+            git_panel: crate::git::GitIntegration::new(),
+            dirty_tracker: crate::dirty_rect::DirtyRectTracker::new(1280.0, 800.0),
+            last_cursor_line: 0,
+            last_cursor_col: 0,
+            last_scroll_y: 0.0,
+            last_selection_start: None,
+            last_selection_end: None,
+            last_sidebar_content: crate::layout::SidebarContent::FileTree,
+            last_right_panel_visible: false,
+            last_bottom_panel_visible: false,
+            last_status_message: "就绪".to_string(),
         };
         // 创建第一个标签页并同步
         state.tabs.push(Tab::new());
@@ -346,17 +436,16 @@ impl EditorState {
     }
 
     pub fn init_render_target(&mut self) -> Result<()> {
-        let dpi = self.dpi_scale * 96.0;
+        let _dpi = self.dpi_scale * 96.0;
         let phys_w = (self.window_width as f32 * self.dpi_scale) as u32;
         let phys_h = (self.window_height as f32 * self.dpi_scale) as u32;
-        let target = RenderTarget::new(
+        self.render_ctx.init_render_target(
             &self.d2d_factory,
             self.hwnd,
             phys_w,
             phys_h,
-            dpi,
+            self.dpi_scale,
         )?;
-        self.render_target = Some(target);
         Ok(())
     }
 
@@ -367,9 +456,9 @@ impl EditorState {
         self.window_width = log_w;
         self.window_height = log_h;
         self.layout.resize_window(log_w as f32, log_h as f32);
-        if let Some(rt) = &mut self.render_target {
-            let _ = rt.resize(phys_width, phys_height);
-        }
+        // 更新脏矩形追踪器窗口尺寸，触发全窗口重绘
+        self.dirty_tracker.resize(log_w as f32, log_h as f32);
+        self.render_ctx.resize(phys_width, phys_height);
     }
 
     /// 检查当前标签页是否可以重用（空文件且未修改）
@@ -543,8 +632,28 @@ impl EditorState {
 
     /// 保存文件，返回是否成功
     pub fn save_file(&mut self) -> bool {
-        if let Some(path) = &self.file_path {
+        if let Some(path) = &self.file_path.clone() {
             let text = self.buffer.get_all_text();
+            // 处理远程文件保存
+            if let Some(remote_path) = path.to_str().and_then(|s| s.strip_prefix("remote:")) {
+                if let Some(session) = &self.remote_session {
+                    match session.write_remote_file(remote_path, text.as_bytes()) {
+                        Ok(()) => {
+                            self.is_dirty = false;
+                            self.sync_to_tab();
+                            self.status_message = format!("已保存到远程: {}", remote_path);
+                            return true;
+                        }
+                        Err(e) => {
+                            self.status_message = format!("保存远程文件失败: {}", e);
+                            return false;
+                        }
+                    }
+                } else {
+                    self.status_message = "远程会话未连接".to_string();
+                    return false;
+                }
+            }
             match std::fs::write(path, text) {
                 Ok(()) => {
                     self.is_dirty = false;
@@ -687,6 +796,58 @@ impl EditorState {
         self.scroll_y = (self.scroll_y + delta_y).clamp(0.0, max_scroll);
     }
 
+    /// 侧边栏滚动（文件树虚拟滚动）
+    pub fn scroll_sidebar(&mut self, delta_y: f32) {
+        match &self.sidebar_content {
+            crate::layout::SidebarContent::FileTree => {
+                let node_height = 20.0;
+                let estimated_nodes = if let Some(tree) = &self.file_tree {
+                    tree.len() as f32
+                } else {
+                    0.0
+                };
+                let total_height = estimated_nodes * node_height + 20.0;
+                let sidebar_region = self.layout.sidebar_region();
+                let visible_height = sidebar_region.height;
+                let max_scroll = (total_height - visible_height).max(0.0);
+                self.sidebar_scroll_y = (self.sidebar_scroll_y + delta_y).clamp(0.0, max_scroll);
+            }
+            crate::layout::SidebarContent::RemoteFileTree => {
+                let node_height = 20.0;
+                let estimated_nodes = if let Some(tree) = &self.remote_file_tree {
+                    tree.nodes.len() as f32
+                } else {
+                    0.0
+                };
+                let total_height = estimated_nodes * node_height + 40.0;
+                let sidebar_region = self.layout.sidebar_region();
+                let visible_height = sidebar_region.height;
+                let max_scroll = (total_height - visible_height).max(0.0);
+                self.remote_scroll_y = (self.remote_scroll_y + delta_y).clamp(0.0, max_scroll);
+            }
+            crate::layout::SidebarContent::SourceControlPanel => {
+                let item_height = 22.0;
+                let staged = self.git.staged_files().len() as f32;
+                let unstaged = self.git.unstaged_files().len() as f32;
+                let untracked = self.git.untracked_files().len() as f32;
+                let total_height = 100.0 + (staged + unstaged + untracked) * item_height + 60.0;
+                let sidebar_region = self.layout.sidebar_region();
+                let visible_height = sidebar_region.height;
+                let max_scroll = (total_height - visible_height).max(0.0);
+                self.git.scroll_y = (self.git.scroll_y + delta_y).clamp(0.0, max_scroll);
+            }
+            crate::layout::SidebarContent::AiAssistantPanel => {
+                let msg_height = 60.0;
+                let total_height = self.ai_panel.messages.len() as f32 * msg_height + 200.0;
+                let sidebar_region = self.layout.sidebar_region();
+                let visible_height = sidebar_region.height;
+                let max_scroll = (total_height - visible_height).max(0.0);
+                self.ai_panel.scroll_y = (self.ai_panel.scroll_y + delta_y).clamp(0.0, max_scroll);
+            }
+            _ => {}
+        }
+    }
+
     /// 设置剪贴板文本
     fn set_clipboard_text(text: &str) {
         use windows::Win32::System::DataExchange::{OpenClipboard, EmptyClipboard, CloseClipboard, SetClipboardData};
@@ -790,10 +951,10 @@ impl EditorState {
                 self.paste();
             }
             crate::menu_bar::CommandId::EditFind => {
-                self.status_message = "查找功能即将推出".to_string();
+                self.toggle_find();
             }
             crate::menu_bar::CommandId::EditReplace => {
-                self.status_message = "替换功能即将推出".to_string();
+                self.toggle_replace();
             }
             crate::menu_bar::CommandId::EditSelectAll | crate::menu_bar::CommandId::SelectAll => {
                 self.select_all();
@@ -826,7 +987,11 @@ impl EditorState {
                 self.status_message = "调试功能即将推出".to_string();
             }
             crate::menu_bar::CommandId::TerminalNew => {
-                self.status_message = "终端功能即将推出".to_string();
+                self.layout.toggle_bottom_panel();
+                if self.layout.bottom_panel_visible && !self.terminal_panel.running {
+                    let _ = self.terminal_panel.start();
+                }
+                self.status_message = if self.layout.bottom_panel_visible { "终端已打开" } else { "终端已关闭" }.to_string();
             }
             crate::menu_bar::CommandId::HelpAbout => {
                 self.status_message = "牧羊人编辑器 v0.1.0".to_string();
@@ -843,12 +1008,34 @@ impl EditorState {
         }
         self.file_tree = Some(tree);
         self.current_folder = Some(path.clone());
+        // 检测 Git 仓库
+        self.git.detect(&path);
+        if let Some(branch) = self.git.current_branch_name() {
+            self.status_bar.update_git_branch(Some(&branch));
+        } else {
+            self.status_bar.update_git_branch(None);
+        }
         self.status_message = format!("已打开文件夹: {}", path.display());
         // 记录到最近项目列表
         self.recent_projects.add(&path);
     }
 
-    pub fn handle_sidebar_click(&mut self, _mouse_x: f32, mouse_y: f32) -> bool {
+    pub fn handle_sidebar_click(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
+        match &self.sidebar_content {
+            crate::layout::SidebarContent::FileTree => {
+                self.handle_file_tree_click(mouse_x, mouse_y)
+            }
+            crate::layout::SidebarContent::SourceControlPanel => {
+                self.handle_git_panel_click(mouse_x, mouse_y)
+            }
+            crate::layout::SidebarContent::RemoteFileTree => {
+                self.handle_remote_tree_click(mouse_x, mouse_y)
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_file_tree_click(&mut self, _mouse_x: f32, mouse_y: f32) -> bool {
         let tree = match self.file_tree.as_ref() {
             Some(t) => t,
             None => return false,
@@ -880,8 +1067,214 @@ impl EditorState {
         false
     }
 
+    fn handle_git_panel_click(&mut self, mouse_x: f32, mouse_y: f32) -> bool {
+        if !self.git.is_repo() {
+            return false;
+        }
+        // Git 面板布局：分支(30px) + commit输入(30px) + 按钮(30px) + 分隔(5px) + staged + unstaged + untracked
+        // 简化实现：根据鼠标位置检测点击的文件或按钮
+        let mut current_y = 10.0f32;
+        let sidebar_width = self.layout.sidebar_width;
+        let item_height = 22.0f32;
+        let section_gap = 8.0f32;
+
+        // 跳过标题和分支区域 (约 70px)
+        current_y += 70.0;
+
+        // 检测按钮点击 (Commit, Refresh)
+        let button_y = current_y;
+        if mouse_y >= button_y && mouse_y < button_y + 26.0 {
+            if mouse_x >= 10.0 && mouse_x < 70.0 {
+                // Commit 按钮
+                if !self.git.commit_message.is_empty() {
+                    let msg = self.git.commit_message.clone();
+                    let _ = self.git.commit(&msg);
+                    self.git.commit_message.clear();
+                }
+                return true;
+            } else if mouse_x >= 80.0 && mouse_x < 140.0 {
+                // Refresh 按钮
+                self.git.refresh();
+                return true;
+            }
+        }
+        current_y += 36.0;
+
+        // 检测文件列表点击
+        let staged = self.git.staged_files();
+        let unstaged = self.git.unstaged_files();
+        let untracked = self.git.untracked_files();
+
+        // Staged Changes
+        if !staged.is_empty() {
+            current_y += section_gap + 20.0; // 标题
+            for (file, _status) in &staged {
+                if mouse_y >= current_y && mouse_y < current_y + item_height {
+                    if mouse_x >= sidebar_width - 30.0 && mouse_x < sidebar_width - 10.0 {
+                        // 点击取消暂存
+                        let _ = self.git.unstage_file(file);
+                    } else {
+                        // 点击选择文件，显示 diff
+                        self.git.selected_file = Some(file.clone());
+                        self.show_git_diff(file, true);
+                    }
+                    return true;
+                }
+                current_y += item_height;
+            }
+            current_y += section_gap;
+        }
+
+        // Changes (unstaged)
+        if !unstaged.is_empty() {
+            current_y += section_gap + 20.0;
+            for (file, _status) in &unstaged {
+                if mouse_y >= current_y && mouse_y < current_y + item_height {
+                    if mouse_x >= sidebar_width - 30.0 && mouse_x < sidebar_width - 10.0 {
+                        // 点击暂存
+                        let _ = self.git.stage_file(file);
+                    } else {
+                        self.git.selected_file = Some(file.clone());
+                        self.show_git_diff(file, false);
+                    }
+                    return true;
+                }
+                current_y += item_height;
+            }
+            current_y += section_gap;
+        }
+
+        // Untracked
+        if !untracked.is_empty() {
+            current_y += section_gap + 20.0;
+            for file in &untracked {
+                if mouse_y >= current_y && mouse_y < current_y + item_height {
+                    if mouse_x >= sidebar_width - 30.0 && mouse_x < sidebar_width - 10.0 {
+                        let _ = self.git.stage_file(file);
+                    } else {
+                        self.git.selected_file = Some(file.clone());
+                    }
+                    return true;
+                }
+                current_y += item_height;
+            }
+        }
+
+        false
+    }
+
+    fn handle_remote_tree_click(&mut self, _mouse_x: f32, mouse_y: f32) -> bool {
+        let tree = match self.remote_file_tree.as_ref() {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let mut current_y = 10.0 - self.remote_scroll_y;
+        for (i, node) in tree.nodes.iter().enumerate() {
+            if mouse_y >= current_y && mouse_y < current_y + 20.0 {
+                if node.is_dir {
+                    // 展开/折叠目录
+                    if let Some(tree) = self.remote_file_tree.as_mut() {
+                        if let Some(n) = tree.nodes.get_mut(i) {
+                            n.is_expanded = !n.is_expanded;
+                        }
+                    }
+                } else {
+                    // 打开远程文件
+                    self.selected_remote_node = Some(i);
+                    if let Some(session) = &self.remote_session {
+                        let remote_path = node.path.clone();
+                        match session.read_remote_file(&remote_path) {
+                            Ok(content) => {
+                                let text = String::from_utf8_lossy(&content).to_string();
+                                let tab = crate::tabs::Tab {
+                                    file_path: Some(PathBuf::from(format!("remote:{}", remote_path))),
+                                    buffer: PieceTable::from_string(text),
+                                    cursor_line: 0,
+                                    cursor_col: 0,
+                                    selection_start: None,
+                                    selection_end: None,
+                                    scroll_y: 0.0,
+                                    history: History::new(),
+                                    is_dirty: false,
+                                    cached_lines: Vec::new(),
+                                    cached_tokens: Vec::new(),
+                                    line_cache_versions: Vec::new(),
+                                    buffer_version: 1,
+                                    language: Language::PlainText,
+                                };
+                                self.open_in_new_tab(tab);
+                                self.status_message = format!("已打开远程文件: {}", remote_path);
+                            }
+                            Err(e) => {
+                                self.status_message = format!("读取远程文件失败: {}", e);
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
+            current_y += 20.0;
+        }
+        false
+    }
+
+    /// 显示 Git diff 视图
+    pub fn show_git_diff(&mut self, file: &str, staged: bool) {
+        if let Some(path) = &self.current_folder {
+            let args = if staged {
+                vec!["diff", "--cached", "--", file]
+            } else {
+                vec!["diff", "--", file]
+            };
+            let (stdout, stderr, success) = crate::git::GitCommand::exec(path, &args);
+            if success {
+                let diff_text = if stdout.is_empty() {
+                    format!("// 无差异: {}\n", file)
+                } else {
+                    stdout
+                };
+                let tab = crate::tabs::Tab {
+                    file_path: Some(PathBuf::from(format!("diff: {}", file))),
+                    buffer: PieceTable::from_string(diff_text),
+                    cursor_line: 0,
+                    cursor_col: 0,
+                    selection_start: None,
+                    selection_end: None,
+                    scroll_y: 0.0,
+                    history: History::new(),
+                    is_dirty: false,
+                    cached_lines: Vec::new(),
+                    cached_tokens: Vec::new(),
+                    line_cache_versions: Vec::new(),
+                    buffer_version: 1,
+                    language: Language::PlainText,
+                };
+                self.open_in_new_tab(tab);
+                self.status_message = format!("显示 {} 的差异", file);
+            } else {
+                self.status_message = format!("获取差异失败: {}", stderr);
+            }
+        }
+    }
+
     /// 更新文件树悬停状态，返回是否需要重绘
     pub fn update_file_tree_hover(&mut self, _mouse_x: f32, mouse_y: f32) -> bool {
+        match &self.sidebar_content {
+            crate::layout::SidebarContent::FileTree => {
+                self.update_local_tree_hover(_mouse_x, mouse_y)
+            }
+            crate::layout::SidebarContent::RemoteFileTree => {
+                self.update_remote_tree_hover(mouse_y)
+            }
+            _ => {
+                let old = self.hover_file_node.take();
+                old.is_some()
+            }
+        }
+    }
+
+    fn update_local_tree_hover(&mut self, _mouse_x: f32, mouse_y: f32) -> bool {
         let tree = match self.file_tree.as_ref() {
             Some(t) => t,
             None => {
@@ -897,6 +1290,111 @@ impl EditorState {
         let changed = self.hover_file_node != new_hover;
         self.hover_file_node = new_hover;
         changed
+    }
+
+    fn update_remote_tree_hover(&mut self, mouse_y: f32) -> bool {
+        let tree = match self.remote_file_tree.as_ref() {
+            Some(t) => t,
+            None => {
+                let old = self.hover_remote_node.take();
+                return old.is_some();
+            }
+        };
+
+        let mut current_y = 10.0 - self.remote_scroll_y;
+        let mut new_hover = None;
+        for (i, _node) in tree.nodes.iter().enumerate() {
+            if mouse_y >= current_y && mouse_y < current_y + 20.0 {
+                new_hover = Some(i);
+                break;
+            }
+            current_y += 20.0;
+        }
+        let changed = self.hover_remote_node != new_hover;
+        self.hover_remote_node = new_hover;
+        changed
+    }
+
+    /// 处理 SSH 对话框点击
+    pub fn handle_ssh_dialog_click(&mut self, mouse_x: f32, mouse_y: f32) -> Option<crate::ssh::DialogAction> {
+        if let Some(rect) = &self.ssh_dialog.connect_btn_rect {
+            if rect.contains(mouse_x, mouse_y) {
+                self.ssh_dialog.hover_button = Some(0);
+                return Some(crate::ssh::DialogAction::Connect);
+            }
+        }
+        if let Some(rect) = &self.ssh_dialog.cancel_btn_rect {
+            if rect.contains(mouse_x, mouse_y) {
+                self.ssh_dialog.hover_button = Some(1);
+                return Some(crate::ssh::DialogAction::Cancel);
+            }
+        }
+        self.ssh_dialog.hover_button = None;
+        Some(crate::ssh::DialogAction::None)
+    }
+
+    /// 处理克隆对话框点击
+    pub fn handle_clone_dialog_click(&mut self, mouse_x: f32, mouse_y: f32) -> Option<crate::ssh::DialogAction> {
+        if let Some(rect) = &self.clone_dialog.clone_btn_rect {
+            if rect.contains(mouse_x, mouse_y) {
+                self.clone_dialog.hover_button = Some(0);
+                return Some(crate::ssh::DialogAction::Connect);
+            }
+        }
+        if let Some(rect) = &self.clone_dialog.cancel_btn_rect {
+            if rect.contains(mouse_x, mouse_y) {
+                self.clone_dialog.hover_button = Some(1);
+                return Some(crate::ssh::DialogAction::Cancel);
+            }
+        }
+        self.clone_dialog.hover_button = None;
+        Some(crate::ssh::DialogAction::None)
+    }
+
+    /// 处理 SSH 对话框键盘输入
+    pub fn handle_ssh_dialog_key(&mut self, ch: char) {
+        match self.ssh_dialog.focus_field {
+            0 => self.ssh_dialog.host.push(ch),
+            1 => if ch.is_ascii_digit() { self.ssh_dialog.port.push(ch); }
+            2 => self.ssh_dialog.username.push(ch),
+            3 => {
+                match self.ssh_dialog.auth_type {
+                    crate::ssh::SshAuthType::Password => self.ssh_dialog.password.push(ch),
+                    crate::ssh::SshAuthType::Key => self.ssh_dialog.key_path.push(ch),
+                    crate::ssh::SshAuthType::Agent => {}
+                }
+            }
+            4 => self.ssh_dialog.key_passphrase.push(ch),
+            _ => {}
+        }
+    }
+
+    /// 处理 SSH 对话框退格
+    pub fn handle_ssh_dialog_backspace(&mut self) {
+        match self.ssh_dialog.focus_field {
+            0 => { self.ssh_dialog.host.pop(); }
+            1 => { self.ssh_dialog.port.pop(); }
+            2 => { self.ssh_dialog.username.pop(); }
+            3 => {
+                match self.ssh_dialog.auth_type {
+                    crate::ssh::SshAuthType::Password => { self.ssh_dialog.password.pop(); }
+                    crate::ssh::SshAuthType::Key => { self.ssh_dialog.key_path.pop(); }
+                    crate::ssh::SshAuthType::Agent => {}
+                }
+            }
+            4 => { self.ssh_dialog.key_passphrase.pop(); }
+            _ => {}
+        }
+    }
+
+    /// 处理克隆对话框键盘输入
+    pub fn handle_clone_dialog_key(&mut self, ch: char) {
+        self.clone_dialog.url.push(ch);
+    }
+
+    /// 处理克隆对话框退格
+    pub fn handle_clone_dialog_backspace(&mut self) {
+        self.clone_dialog.url.pop();
     }
 
     /// 根据当前打开的文件路径同步文件树选中状态
@@ -1052,15 +1550,59 @@ impl EditorState {
         self.status_message = "已修改".to_string();
     }
 
+    pub fn insert_tab(&mut self) {
+        let pos = self.cursor_byte_pos();
+        let before_pieces = self.buffer.get_pieces();
+        let before_add_len = self.buffer.add_buffer_len();
+        let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+
+        let tab_text = "    ";
+        self.buffer.insert(pos, tab_text);
+        self.cursor_col += tab_text.len();
+        self.is_dirty = true;
+        self.buffer_version += 1;
+
+        let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+        self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, pos);
+        self.status_message = "已修改".to_string();
+    }
+
     pub fn insert_newline(&mut self) {
         let pos = self.cursor_byte_pos();
         let before_pieces = self.buffer.get_pieces();
         let before_add_len = self.buffer.add_buffer_len();
         let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
 
-        self.buffer.insert(pos, "\n");
+        // 获取当前行的前导空白（用于自动缩进）
+        let indent = if let Some(line_text) = self.buffer.get_line(self.cursor_line) {
+            let leading_ws: String = line_text.chars().take_while(|c| c.is_whitespace()).collect();
+            leading_ws
+        } else {
+            String::new()
+        };
+
+        // 检测是否需要额外缩进（行尾有 { 或 :）
+        let extra_indent = if let Some(line_text) = self.buffer.get_line(self.cursor_line) {
+            let trimmed = line_text.trim_end();
+            if trimmed.ends_with('{') || trimmed.ends_with(':') {
+                "    "
+            } else {
+                ""
+            }
+        } else {
+            ""
+        };
+
+        let full_indent = format!("{}{}", indent, extra_indent);
+        let insert_text = if full_indent.is_empty() {
+            "\n".to_string()
+        } else {
+            format!("\n{}", full_indent)
+        };
+
+        self.buffer.insert(pos, &insert_text);
         self.cursor_line += 1;
-        self.cursor_col = 0;
+        self.cursor_col = full_indent.len();
         self.is_dirty = true;
         self.buffer_version += 1;
 
@@ -1436,7 +1978,6 @@ impl EditorState {
     /// 增量重建缓存：只重建可见行范围内的缓存，大幅减少大文件的词法分析开销
     pub(crate) fn rebuild_cache(&mut self, visible_start: usize, visible_end: usize) {
         let total_lines = self.buffer.len_lines().max(1);
-        let lexer = self.language.create_lexer();
 
         // 如果行数变化，重新调整缓存向量大小
         if self.cached_lines.len() != total_lines {
@@ -1445,17 +1986,34 @@ impl EditorState {
             self.line_cache_versions.resize(total_lines, 0);
         }
 
+        // 调整行号 UTF-16 缓存大小
+        if self.cached_line_numbers.len() != total_lines {
+            self.cached_line_numbers.resize_with(total_lines, || Vec::new());
+        }
+
         // 只重建可见行范围内的缓存（加上前后各2行的缓冲，避免滚动时闪烁）
         let cache_start = visible_start.saturating_sub(2);
         let cache_end = (visible_end + 2).min(total_lines);
 
+        // 延迟创建 lexer：只在发现至少一行需要重建时才创建
+        // 避免每帧都创建 lexer（Box 分配 + 初始化开销）
+        let mut lexer: Option<Box<dyn aether_core::lexer::Lexer>> = None;
+
         for i in cache_start..cache_end {
             if self.line_cache_versions[i] != self.buffer_version {
+                if lexer.is_none() {
+                    lexer = Some(self.language.create_lexer());
+                }
                 let line = self.buffer.get_line(i).unwrap_or_default();
-                let tokens = lexer.lex_full(&line);
+                let tokens = lexer.as_ref().unwrap().lex_full(&line);
                 self.cached_lines[i] = line;
                 self.cached_tokens[i] = tokens;
                 self.line_cache_versions[i] = self.buffer_version;
+            }
+            // 行号 UTF-16 缓存：如果为空则构建
+            if self.cached_line_numbers[i].is_empty() {
+                let num_str = format!("{}", i + 1);
+                self.cached_line_numbers[i] = num_str.encode_utf16().chain(Some(0)).collect();
             }
         }
     }
@@ -1519,6 +2077,236 @@ impl EditorState {
             result.end_line.min(total_lines.saturating_sub(1))
         };
         self.invalidate_line_cache(result.start_line, end_line);
+    }
+
+    /// 查找所有匹配位置
+    /// 优化：缓存查询结果，避免查询未变且文本未变时重复全量扫描
+    pub fn find_all(&mut self) {
+        self.find_active_index = 0;
+        if self.find_query.is_empty() {
+            self.find_results.clear();
+            self.last_find_query.clear();
+            return;
+        }
+        // 缓存命中：查询和文本版本都未变，跳过搜索
+        if self.find_query == self.last_find_query && self.find_result_version == self.buffer_version && !self.find_results.is_empty() {
+            // 结果已有效，无需重新搜索
+            return;
+        }
+        // 缓存未命中：清空并重新搜索
+        self.find_results.clear();
+        let query = self.find_query.clone();
+        let total_lines = self.buffer.len_lines();
+        for line_idx in 0..total_lines {
+            if let Some(line) = self.buffer.get_line(line_idx) {
+                let mut start = 0;
+                while let Some(pos) = line[start..].find(&query) {
+                    let abs_pos = start + pos;
+                    self.find_results.push((line_idx, abs_pos));
+                    start = abs_pos + query.len();
+                    if start >= line.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        // 更新缓存状态
+        self.last_find_query = query;
+        self.find_result_version = self.buffer_version;
+    }
+
+    /// 跳转到下一个匹配
+    pub fn find_next(&mut self) {
+        if self.find_results.is_empty() {
+            self.find_all();
+        }
+        if !self.find_results.is_empty() {
+            self.find_active_index = (self.find_active_index + 1) % self.find_results.len();
+            let (line, col) = self.find_results[self.find_active_index];
+            self.cursor_line = line;
+            self.cursor_col = col;
+            // 选中匹配文本
+            self.selection_start = Some((line, col));
+            self.selection_end = Some((line, col + self.find_query.len()));
+        }
+    }
+
+    /// 跳转到上一个匹配
+    pub fn find_prev(&mut self) {
+        if self.find_results.is_empty() {
+            self.find_all();
+        }
+        if !self.find_results.is_empty() {
+            if self.find_active_index == 0 {
+                self.find_active_index = self.find_results.len() - 1;
+            } else {
+                self.find_active_index -= 1;
+            }
+            let (line, col) = self.find_results[self.find_active_index];
+            self.cursor_line = line;
+            self.cursor_col = col;
+            self.selection_start = Some((line, col));
+            self.selection_end = Some((line, col + self.find_query.len()));
+        }
+    }
+
+    /// 替换当前匹配
+    pub fn replace_current(&mut self) -> bool {
+        if self.find_results.is_empty() || self.find_active_index >= self.find_results.len() {
+            return false;
+        }
+        let (line, col) = self.find_results[self.find_active_index];
+        let pos = self.line_byte_start(line) + col;
+        let end_pos = pos + self.find_query.len();
+
+        let before_pieces = self.buffer.get_pieces();
+        let before_add_len = self.buffer.add_buffer_len();
+        let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+
+        self.buffer.delete(pos, end_pos);
+        self.buffer.insert(pos, &self.replace_text);
+        self.is_dirty = true;
+        self.buffer_version += 1;
+
+        self.cursor_line = line;
+        self.cursor_col = col + self.replace_text.len();
+        let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+        self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, pos);
+
+        // 重新查找
+        self.find_all();
+        true
+    }
+
+    /// 替换所有匹配
+    pub fn replace_all(&mut self) -> usize {
+        if self.find_query.is_empty() || self.find_query == self.replace_text {
+            return 0;
+        }
+        self.find_all();
+        let count = self.find_results.len();
+        if count == 0 {
+            return 0;
+        }
+
+        // 从后往前替换，避免位置偏移
+        let replacements = self.find_results.clone();
+        let query_len = self.find_query.len();
+        let replace_text = self.replace_text.clone();
+
+        for (line, col) in replacements.iter().rev() {
+            let pos = self.line_byte_start(*line) + *col;
+            let end_pos = pos + query_len;
+            self.buffer.delete(pos, end_pos);
+            self.buffer.insert(pos, &replace_text);
+        }
+
+        self.is_dirty = true;
+        self.buffer_version += 1;
+        self.find_results.clear();
+        self.find_active_index = 0;
+        self.status_message = format!("已替换 {} 处", count);
+        count
+    }
+
+    /// 切换查找面板
+    pub fn toggle_find(&mut self) {
+        self.find_visible = !self.find_visible;
+        if !self.find_visible {
+            self.replace_visible = false;
+            self.find_focus = FindReplaceFocus::None;
+        } else {
+            self.find_focus = FindReplaceFocus::FindQuery;
+        }
+        if self.find_visible && !self.find_query.is_empty() {
+            self.find_all();
+        }
+    }
+
+    /// 切换替换面板
+    pub fn toggle_replace(&mut self) {
+        self.replace_visible = !self.replace_visible;
+        self.find_visible = self.replace_visible || self.find_visible;
+        if !self.find_visible {
+            self.find_focus = FindReplaceFocus::None;
+        } else {
+            self.find_focus = if self.replace_visible { FindReplaceFocus::FindQuery } else { FindReplaceFocus::None };
+        }
+        if self.find_visible && !self.find_query.is_empty() {
+            self.find_all();
+        }
+    }
+
+    /// 关闭查找替换面板
+    pub fn close_find_replace(&mut self) {
+        self.find_visible = false;
+        self.replace_visible = false;
+        self.find_focus = FindReplaceFocus::None;
+    }
+
+    /// 应用 AI 生成的代码到当前编辑器
+    pub fn apply_ai_code(&mut self, code: &str) -> bool {
+        if code.is_empty() {
+            return false;
+        }
+        // 如果有选区，替换选区内容；否则在当前光标位置插入
+        if self.selection_start.is_some() && self.selection_end.is_some() {
+            let (start_line, start_col) = self.selection_start.unwrap();
+            let (end_line, end_col) = self.selection_end.unwrap();
+            let (first_line, first_col) = if start_line <= end_line { (start_line, start_col) } else { (end_line, end_col) };
+            let (last_line, last_col) = if start_line <= end_line { (end_line, end_col) } else { (start_line, start_col) };
+            let start_byte = self.line_byte_start(first_line) + first_col;
+            let end_byte = self.line_byte_start(last_line) + last_col;
+            
+            let before_pieces = self.buffer.get_pieces();
+            let before_add_len = self.buffer.add_buffer_len();
+            let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+            
+            self.buffer.delete(start_byte, end_byte);
+            self.buffer.insert(start_byte, code);
+            
+            // 计算新光标位置
+            let code_lines: Vec<&str> = code.lines().collect();
+            let new_line = first_line + code_lines.len().saturating_sub(1);
+            let new_col = if code_lines.len() <= 1 {
+                first_col + code.len()
+            } else {
+                code_lines.last().unwrap_or(&"").len()
+            };
+            self.cursor_line = new_line;
+            self.cursor_col = new_col;
+            let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+            self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, start_byte);
+            
+            self.clear_selection();
+            self.is_dirty = true;
+            self.buffer_version += 1;
+            self.status_message = "已应用 AI 代码".to_string();
+            return true;
+        }
+        let pos = self.cursor_byte_pos();
+        let before_pieces = self.buffer.get_pieces();
+        let before_add_len = self.buffer.add_buffer_len();
+        let cursor_before = CursorPosition::new(self.cursor_line, self.cursor_col);
+        
+        self.buffer.insert(pos, code);
+        
+        // 更新光标位置
+        let _code_lines: Vec<&str> = code.lines().collect();
+        let line_breaks = code.matches('\n').count();
+        if line_breaks == 0 {
+            self.cursor_col += code.len();
+        } else {
+            self.cursor_line += line_breaks;
+            self.cursor_col = code.rsplit_once('\n').map(|(_, last)| last.len()).unwrap_or(0);
+        }
+        let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
+        self.history.record(before_pieces, before_add_len, cursor_before, cursor_after, OpType::Insert, pos);
+        
+        self.is_dirty = true;
+        self.buffer_version += 1;
+        self.status_message = "已插入 AI 代码".to_string();
+        true
     }
 }
 

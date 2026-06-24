@@ -1,14 +1,10 @@
 [package]
-name = "aether-remote"
+name = "aether-ai"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-git2 = "0.20"
-base64 = "0.22"
-ssh2 = "0.9"
-
-[dev-dependencies]
-tempfile = "3.10"
+ureq = { version = "2.9", features = ["json"] }
+aether-shared = { path = "../aether-shared" }

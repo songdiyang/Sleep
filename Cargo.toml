@@ -8,6 +8,8 @@ members = [
     "crates/aether-dap",
     "crates/aether-plugin",
     "crates/aether-remote",
+    "crates/aether-ai",
+    "crates/aether-shared",
 ]
 resolver = "2"
 

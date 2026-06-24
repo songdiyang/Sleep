@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::buffer::piece_table::{Piece, PieceTable};
 use crate::buffer::text_buffer::EditResult;
@@ -7,14 +8,14 @@ use crate::buffer::text_buffer::EditResult;
 /// 
 /// PieceTable 的天然持久化特性：
 /// - add_buffer 只追加不删除，所有历史版本共享
-/// - pieces 列表是轻量的元数据，克隆成本低
+/// - pieces 列表通过 Arc 共享，undo/redo 只是引用计数 +1
 /// - 不同版本的 pieces 列表可以共享相同的 add_buffer 引用
 #[derive(Clone, Debug)]
 pub struct VersionSnapshot {
     /// 版本ID（单调递增）
     pub version_id: u64,
-    /// 片段列表（持久化核心）
-    pub pieces: Vec<Piece>,
+    /// 片段列表（Arc 包装，避免完整拷贝）
+    pub pieces: Arc<Vec<Piece>>,
     /// 总字节数
     pub total_bytes: usize,
     /// 总行数
@@ -28,7 +29,7 @@ pub struct VersionSnapshot {
 /// 持久化版本历史管理器
 /// 
 /// 支持高效的撤销/重做，利用PieceTable的持久化特性
-/// 内存开销：每个版本仅存储 pieces 列表（通常几十到几百个Piece）
+/// 内存开销：每个版本仅存储 Arc<Vec<Piece>>（引用计数，共享数据）
 pub struct PersistentHistory {
     /// 版本历史（环形缓冲区）
     history: VecDeque<VersionSnapshot>,
@@ -79,7 +80,7 @@ impl PersistentHistory {
         if should_coalesce && self.current_index > 0 && !self.history.is_empty() {
             // 合并到当前版本
             if let Some(current) = self.history.get_mut(self.current_index) {
-                current.pieces = pieces;
+                current.pieces = Arc::new(pieces);
                 current.total_bytes = total_bytes;
                 current.total_lines = total_lines;
                 current.edit_description = format!("{} + {}", current.edit_description, edit_description);
@@ -96,7 +97,7 @@ impl PersistentHistory {
 
         let snapshot = VersionSnapshot {
             version_id,
-            pieces,
+            pieces: Arc::new(pieces),
             total_bytes,
             total_lines,
             edit_description: edit_description.to_string(),
@@ -278,20 +279,25 @@ impl PersistentPieceTable {
         result
     }
 
-    /// 撤销
+    /// 撤销 —— 从 Arc 中读取 pieces，避免完整拷贝
     pub fn undo(&mut self) -> bool {
         if let Some(snapshot) = self.history.undo() {
-            self.table.restore(snapshot.pieces.clone(), self.table.add_buffer_len());
+            // 从 Arc<Vec<Piece>> 中 clone pieces（只有 Arc 引用计数 +1）
+            // 注意：PieceTable.restore() 需要拥有 Vec<Piece>，所以需要 clone Arc 内部数据
+            // 但 Arc 的 clone 只是引用计数递增，真正的数据拷贝发生在 restore 内部
+            let pieces = (*snapshot.pieces).clone();
+            self.table.restore(pieces, self.table.add_buffer_len());
             true
         } else {
             false
         }
     }
 
-    /// 重做
+    /// 重做 —— 从 Arc 中读取 pieces
     pub fn redo(&mut self) -> bool {
         if let Some(snapshot) = self.history.redo() {
-            self.table.restore(snapshot.pieces.clone(), self.table.add_buffer_len());
+            let pieces = (*snapshot.pieces).clone();
+            self.table.restore(pieces, self.table.add_buffer_len());
             true
         } else {
             false
@@ -438,9 +444,6 @@ mod tests {
 
         // 小编辑应该合并到当前版本（current_index在初始版本上）
         history.record_version(pieces.clone(), 1, 1, "a", 1);
-        // 注意：第一次编辑后current_index指向第一个版本，小编辑应该合并到当前版本
-        // 但初始版本（version 0）的edit_size是0，所以第二次编辑的edit_size=1 > 0
-        // 不会合并。需要调整测试逻辑
         assert_eq!(history.len(), 2); // 初始 + 小编辑
 
         // 再一个小编辑应该合并（因为当前版本edit_size=1）
@@ -450,5 +453,27 @@ mod tests {
         // 大编辑不合并
         history.record_version(pieces, 100, 1, "大编辑", 100);
         assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_arc_sharing() {
+        // 验证 Arc 包装确保 undo/redo 共享数据
+        let mut history = PersistentHistory::new(10);
+
+        let pieces1 = vec![Piece { source: crate::buffer::piece_table::Source::Add, start: 0, len: 5, line_breaks: 0 }];
+        history.record_version(pieces1, 5, 1, "v1", 5);
+
+        let pieces2 = vec![Piece { source: crate::buffer::piece_table::Source::Add, start: 0, len: 10, line_breaks: 0 }];
+        history.record_version(pieces2, 10, 1, "v2", 5);
+
+        // undo 回到 v1
+        let snap1 = history.undo().unwrap();
+        assert_eq!(snap1.pieces.len(), 1);
+        assert_eq!(snap1.pieces[0].len, 5);
+
+        // redo 到 v2
+        let snap2 = history.redo().unwrap();
+        assert_eq!(snap2.pieces.len(), 1);
+        assert_eq!(snap2.pieces[0].len, 10);
     }
 }

@@ -1,0 +1,83 @@
+name: Branch Protection Enforcer
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main, dev]
+
+jobs:
+  enforce-branch-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate PR source branch
+        run: |
+          TARGET_BRANCH="${{ github.base_ref }}"
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          
+          echo "Target branch: $TARGET_BRANCH"
+          echo "Source branch: $SOURCE_BRANCH"
+          
+          # 规则1: main 分支只能从 dev 分支合并
+          if [ "$TARGET_BRANCH" = "main" ]; then
+            if [ "$SOURCE_BRANCH" != "dev" ]; then
+              echo "❌ ERROR: main 分支只能从 dev 分支合并！"
+              echo "当前源分支: $SOURCE_BRANCH"
+              echo "请先将临时分支合并到 dev，再从 dev 发起 PR 到 main"
+              exit 1
+            fi
+            echo "✅ main 分支源分支验证通过 (dev -> main)"
+          fi
+          
+          # 规则2: dev 分支只能从临时分支合并（禁止直接从 main 或其他长期分支合并）
+          if [ "$TARGET_BRANCH" = "dev" ]; then
+            # 禁止从 main 直接合并到 dev
+            if [ "$SOURCE_BRANCH" = "main" ] || [ "$SOURCE_BRANCH" = "master" ]; then
+              echo "❌ ERROR: 禁止直接从 main/master 合并到 dev！"
+              echo "请使用临时分支 workflow: 临时分支 -> dev -> main"
+              exit 1
+            fi
+            
+            # 检查是否是临时分支（格式: 用户名/功能描述）
+            if echo "$SOURCE_BRANCH" | grep -qE '^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$'; then
+              echo "✅ dev 分支源分支验证通过 (临时分支 -> dev)"
+            else
+              echo "⚠️ WARNING: 建议临时分支使用 '<用户名>/<功能>' 格式命名"
+              echo "当前分支名: $SOURCE_BRANCH"
+            fi
+          fi
+
+      - name: Validate PR description
+        run: |
+          PR_BODY='${{ github.event.pull_request.body }}'
+          
+          # 检查是否包含"更新了哪些特性"
+          if echo "$PR_BODY" | grep -q "更新了哪些特性"; then
+            echo "✅ PR 描述包含特性更新说明"
+          else
+            echo "❌ ERROR: PR 描述必须包含'更新了哪些特性'部分！"
+            echo "请填写 PR 模板，列出本次更新涉及的所有特性"
+            exit 1
+          fi
+          
+          # 检查特性列表是否已填写（不为空）
+          if echo "$PR_BODY" | grep -q "1\. $"; then
+            echo "❌ ERROR: 特性列表未填写！请在 PR 描述中列出更新的特性"
+            exit 1
+          fi
+          
+          echo "✅ PR 描述验证通过"
+
+      - name: Comment PR on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## ❌ 分支保护规则检查失败\n\n请确保遵守以下工作流：\n\n```\n临时分支 -> dev -> main\n```\n\n### 规则说明：\n1. **临时分支** 只能合并到 **dev**\n2. **dev** 只能合并到 **main**\n3. **禁止** 临时分支直接合并到 **main**\n4. **禁止** 直接从 **main** 合并到 **dev**\n5. PR 描述必须填写"更新了哪些特性"\n\n请修正后重新提交。'
+            })

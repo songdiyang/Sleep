@@ -11,7 +11,7 @@ impl IncrementalChangeCalculator {
     /// 
     /// 这是最高效的同步方式，无需文本对比
     pub fn from_edit_op(
-        edit_kind: EditKind,
+        _edit_kind: EditKind,
         start_byte: usize,
         end_byte: usize,
         text: &str,
@@ -264,7 +264,8 @@ impl OptimizedDocumentSync {
 pub struct LargeFileSyncStrategy {
     /// 大文件阈值（字节）
     large_file_threshold: usize,
-    /// 变更累积阈值
+    /// 变更累积阈值（预留字段，当前未使用）
+    #[allow(dead_code)]
     change_accumulation_threshold: usize,
     /// 同步间隔（毫秒）
     sync_interval_ms: u64,

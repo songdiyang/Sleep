@@ -1,5 +1,4 @@
-use std::sync::{Arc, Mutex};
-use std::thread;
+use rayon::prelude::*;
 
 use crate::lexer::{LexemeSpan, Language};
 
@@ -12,9 +11,11 @@ pub struct RenderLine {
 }
 
 /// 并行渲染预处理器
-/// 在后台线程中预计算可见行的文本和token，减少主线程渲染负担
+///
+/// 使用 rayon 线程池并行处理行的 token 分析
+/// rayon 内置线程池，避免每次调用创建/销毁线程的开销
 pub struct ParallelRenderPrep {
-    /// 线程池大小（通常等于CPU核心数）
+    /// 线程池大小（用于配置 rayon 并行度阈值）
     thread_count: usize,
 }
 
@@ -29,8 +30,9 @@ impl ParallelRenderPrep {
     }
 
     /// 并行预处理可见行的token
-    /// 
-    /// 将行范围分块，每块由一个线程处理
+    ///
+    /// 使用 rayon 的 par_iter 自动分块并行处理
+    /// rayon 线程池复用线程，避免每次创建/销毁开销
     pub fn prepare_tokens_parallel(
         &self,
         lines: &[String],
@@ -41,48 +43,14 @@ impl ParallelRenderPrep {
             return self.prepare_tokens_single(lines, language);
         }
 
-        let chunk_size = (lines.len() + self.thread_count - 1) / self.thread_count;
-        let results = Arc::new(Mutex::new(vec![Vec::new(); lines.len()]));
-
-        let mut handles = Vec::new();
-        for thread_idx in 0..self.thread_count {
-            let start = thread_idx * chunk_size;
-            let end = ((thread_idx + 1) * chunk_size).min(lines.len());
-            if start >= end {
-                break;
-            }
-
-            let chunk_lines: Vec<String> = lines[start..end].to_vec();
-            let results_clone = Arc::clone(&results);
-            let lang = language;
-
-            let handle = thread::spawn(move || {
-                let lexer = lang.create_lexer();
-                let mut local_results = Vec::with_capacity(chunk_lines.len());
-
-                for line in &chunk_lines {
-                    let tokens = lexer.lex_full(line);
-                    local_results.push(tokens);
-                }
-
-                // 写回全局结果
-                let mut global = results_clone.lock().unwrap();
-                for (i, tokens) in local_results.into_iter().enumerate() {
-                    global[start + i] = tokens;
-                }
-            });
-
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            let _ = handle.join();
-        }
-
-        Arc::try_unwrap(results)
-            .unwrap_or_else(|_| panic!("Failed to unwrap Arc"))
-            .into_inner()
-            .unwrap_or_else(|_| panic!("Failed to unwrap Mutex"))
+        // rayon 并行 map-reduce：每个线程独立创建 lexer 并处理分块
+        lines
+            .par_iter()
+            .map(|line| {
+                let lexer = language.create_lexer();
+                lexer.lex_full(line)
+            })
+            .collect()
     }
 
     /// 单线程token预处理（fallback）
