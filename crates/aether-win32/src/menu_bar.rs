@@ -147,7 +147,8 @@ impl MenuBar {
                     "文件(F)",
                     vec![
                         MenuItem::new("新建文件", CommandId::FileNew).with_shortcut("Ctrl+N"),
-                        MenuItem::new("新建窗口", CommandId::FileNewWindow).with_shortcut("Ctrl+Shift+N"),
+                        MenuItem::new("新建窗口", CommandId::FileNewWindow)
+                            .with_shortcut("Ctrl+Shift+N"),
                         MenuItem::new("打开文件...", CommandId::FileOpen).with_shortcut("Ctrl+O"),
                         MenuItem::new("打开文件夹...", CommandId::FileOpenFolder)
                             .with_shortcut("Ctrl+K"),

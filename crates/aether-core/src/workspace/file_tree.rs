@@ -96,7 +96,7 @@ impl FileTree {
                         Some(parent.last_child)
                     }
                 };
-                
+
                 if let Some(last) = last_child_opt {
                     // 使用 unsafe 绕过借用检查：我们知道 parent_idx != last
                     let parent_ptr = self.nodes.as_mut_ptr();

@@ -698,11 +698,30 @@ impl EditorState {
 
 /// 需要跳过的常见大目录（构建输出、依赖缓存等）
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "target", "build", "dist", "out", "vendor",
-    ".git", ".svn", ".hg", ".idea", ".vscode",
-    "__pycache__", ".pytest_cache", "*.egg-info",
-    "bin", "obj", "Debug", "Release", "x64", "x86",
-    "coverage", ".nyc_output", ".next", ".nuxt",
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "out",
+    "vendor",
+    ".git",
+    ".svn",
+    ".hg",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    ".pytest_cache",
+    "*.egg-info",
+    "bin",
+    "obj",
+    "Debug",
+    "Release",
+    "x64",
+    "x86",
+    "coverage",
+    ".nyc_output",
+    ".next",
+    ".nuxt",
 ];
 
 /// 递归构建文件树，跳过常见大目录，限制每层扫描数量
@@ -716,12 +735,12 @@ fn populate_file_tree(
     const MAX_DEPTH: u8 = 3;
 
     let mut entries: Vec<_> = std::fs::read_dir(path)?.filter_map(|e| e.ok()).collect();
-    
+
     // 限制每层目录扫描数量，避免超大目录卡死
     if entries.len() > MAX_ENTRIES_PER_DIR {
         entries.truncate(MAX_ENTRIES_PER_DIR);
     }
-    
+
     entries.sort_by(|a, b| {
         let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -734,12 +753,12 @@ fn populate_file_tree(
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
-        
+
         // 跳过常见大目录
         if SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
-        
+
         let is_dir = entry.file_type()?.is_dir();
         let kind = if is_dir {
             FileKind::Directory
@@ -1184,9 +1203,11 @@ impl EditorState {
                     self.selected_file_node = Some(node_idx);
                     if let Some(path) = self.get_node_path(node_idx) {
                         // 检查该文件是否已在某个标签页中打开
-                        if let Some(existing_tab) = self.tabs.iter().position(|tab| {
-                            tab.file_path.as_ref() == Some(&path)
-                        }) {
+                        if let Some(existing_tab) = self
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.file_path.as_ref() == Some(&path))
+                        {
                             // 切换到已打开的标签页
                             self.switch_tab(existing_tab);
                         } else {

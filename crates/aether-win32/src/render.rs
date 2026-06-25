@@ -5396,7 +5396,11 @@ impl EditorState {
                 .unwrap();
             // 计算标题区域：在菜单项右侧、按钮左侧
             let menu_end_x = if self.menu_bar.item_x_positions.len() > 0 {
-                self.menu_bar.item_x_positions.last().copied().unwrap_or(0.0)
+                self.menu_bar
+                    .item_x_positions
+                    .last()
+                    .copied()
+                    .unwrap_or(0.0)
                     + self.menu_bar.item_widths.last().copied().unwrap_or(0.0)
             } else {
                 0.0
