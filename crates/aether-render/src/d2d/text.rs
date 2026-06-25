@@ -17,6 +17,7 @@ pub struct TextRenderer {
     font_size: f32,
     line_height: f32,
     char_width: f32,
+    dpi_scale: f32,
 }
 
 impl TextRenderer {
@@ -38,7 +39,7 @@ impl TextRenderer {
             text_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
             text_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
 
-            // 估算字符宽度和行高
+            // 估算字符宽度和行高（基于逻辑像素，后续乘以 DPI 缩放）
             let char_width = font_size * 0.6;
             let line_height = font_size * 1.5;
 
@@ -48,8 +49,42 @@ impl TextRenderer {
                 font_size,
                 line_height,
                 char_width,
+                dpi_scale: 1.0,
             })
         }
+    }
+
+    /// 设置 DPI 缩放因子，更新字体大小和测量值
+    pub fn set_dpi_scale(&mut self, scale: f32) {
+        if (self.dpi_scale - scale).abs() < 0.01 {
+            return;
+        }
+        self.dpi_scale = scale;
+        let scaled_font_size = self.font_size * scale;
+        unsafe {
+            // 重新创建 text_format 以应用新的字体大小
+            let new_text_format = self.dwrite_factory.CreateTextFormat(
+                windows::core::w!("Consolas"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                scaled_font_size,
+                windows::core::w!("zh-CN"),
+            );
+            if let Ok(tf) = new_text_format {
+                let _ = tf.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                let _ = tf.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                self.text_format = tf;
+            }
+        }
+        // 重新计算字符宽度和行高
+        self.char_width = self.font_size * 0.6 * scale;
+        self.line_height = self.font_size * 1.5 * scale;
+    }
+
+    pub fn dpi_scale(&self) -> f32 {
+        self.dpi_scale
     }
 
     /// 渲染单行文本

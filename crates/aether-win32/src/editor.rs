@@ -288,14 +288,13 @@ impl EditorState {
     }
 
     /// 处理标签栏点击，返回是否处理了点击
-    pub fn handle_tab_bar_click(&mut self, mouse_x: f32, mouse_y: f32, editor_x: f32) -> bool {
+    /// mouse_y 是相对于标签栏的 y 坐标（已由调用方转换）
+    pub fn handle_tab_bar_click(&mut self, mouse_x: f32, _mouse_y: f32, editor_x: f32) -> bool {
         let tab_bar_height = if self.tabs.len() > 1 { 30.0 } else { 0.0 };
         if tab_bar_height == 0.0 {
             return false;
         }
-        if mouse_y < 0.0 || mouse_y > tab_bar_height {
-            return false;
-        }
+        // mouse_y 已由调用方检查，这里只检查 x 坐标
         if mouse_x < editor_x {
             return false;
         }
@@ -697,6 +696,85 @@ impl EditorState {
     }
 }
 
+/// 需要跳过的常见大目录（构建输出、依赖缓存等）
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "out",
+    "vendor",
+    ".git",
+    ".svn",
+    ".hg",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    ".pytest_cache",
+    "*.egg-info",
+    "bin",
+    "obj",
+    "Debug",
+    "Release",
+    "x64",
+    "x86",
+    "coverage",
+    ".nyc_output",
+    ".next",
+    ".nuxt",
+];
+
+/// 递归构建文件树，跳过常见大目录，限制每层扫描数量
+fn populate_file_tree(
+    tree: &mut FileTree,
+    path: &PathBuf,
+    parent_idx: u32,
+    depth: u8,
+) -> std::io::Result<()> {
+    const MAX_ENTRIES_PER_DIR: usize = 1000;
+    const MAX_DEPTH: u8 = 3;
+
+    let mut entries: Vec<_> = std::fs::read_dir(path)?.filter_map(|e| e.ok()).collect();
+
+    // 限制每层目录扫描数量，避免超大目录卡死
+    if entries.len() > MAX_ENTRIES_PER_DIR {
+        entries.truncate(MAX_ENTRIES_PER_DIR);
+    }
+
+    entries.sort_by(|a, b| {
+        let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        match (a_is_dir, b_is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.file_name().cmp(&b.file_name()),
+        }
+    });
+
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // 跳过常见大目录
+        if SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+
+        let is_dir = entry.file_type()?.is_dir();
+        let kind = if is_dir {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+        let idx = tree.add_node(&name, kind, parent_idx, depth);
+
+        if is_dir && depth < MAX_DEPTH {
+            let _ = populate_file_tree(tree, &entry.path(), idx, depth + 1);
+        }
+    }
+
+    Ok(())
+}
+
 impl EditorState {
     /// 复制选中文本到剪贴板
     pub fn copy(&mut self) {
@@ -884,7 +962,7 @@ impl EditorState {
     }
 
     /// 设置剪贴板文本
-    fn set_clipboard_text(text: &str) {
+    fn set_clipboard_text(text: &str) -> bool {
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::DataExchange::{
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
@@ -896,23 +974,31 @@ impl EditorState {
 
         unsafe {
             if OpenClipboard(None).is_err() {
-                return;
+                return false;
             }
             let _ = EmptyClipboard();
 
             let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
             let byte_size = wide.len() * 2;
 
-            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, byte_size) {
-                let ptr = GlobalLock(hglobal);
-                if !ptr.is_null() {
-                    let dst = ptr as *mut u16;
-                    std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
-                    let _ = GlobalUnlock(hglobal);
-                    let _ = SetClipboardData(CF_UNICODETEXT, HANDLE(hglobal.0));
+            let hglobal = match GlobalAlloc(GMEM_MOVEABLE, byte_size) {
+                Ok(h) => h,
+                Err(_) => {
+                    let _ = CloseClipboard();
+                    return false;
                 }
+            };
+            let ptr = GlobalLock(hglobal);
+            if ptr.is_null() {
+                let _ = CloseClipboard();
+                return false;
             }
+            let dst = ptr as *mut u16;
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
+            let _ = GlobalUnlock(hglobal);
+            let _ = SetClipboardData(CF_UNICODETEXT, HANDLE(hglobal.0));
             let _ = CloseClipboard();
+            true
         }
     }
 
@@ -956,6 +1042,17 @@ impl EditorState {
         match cmd {
             crate::menu_bar::CommandId::FileNew => {
                 self.new_file();
+            }
+            crate::menu_bar::CommandId::FileNewWindow => {
+                // 通过 PostMessage 通知窗口过程创建新窗口
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        hwnd,
+                        windows::Win32::UI::WindowsAndMessaging::WM_APP + 2,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                }
             }
             crate::menu_bar::CommandId::FileOpen => {
                 if let Some(path) = Dialogs::open_file_dialog(hwnd, "打开文件", &[]) {
@@ -1050,7 +1147,7 @@ impl EditorState {
 
     pub fn open_folder(&mut self, path: PathBuf) {
         let mut tree = FileTree::new();
-        if let Err(e) = self.populate_file_tree(&mut tree, &path, u32::MAX, 0) {
+        if let Err(e) = populate_file_tree(&mut tree, &path, u32::MAX, 0) {
             self.status_message = format!("打开文件夹失败: {}", e);
             return;
         }
@@ -1105,7 +1202,17 @@ impl EditorState {
                 FileKind::File => {
                     self.selected_file_node = Some(node_idx);
                     if let Some(path) = self.get_node_path(node_idx) {
-                        self.load_file(path);
+                        // 检查该文件是否已在某个标签页中打开
+                        if let Some(existing_tab) = self
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.file_path.as_ref() == Some(&path))
+                        {
+                            // 切换到已打开的标签页
+                            self.switch_tab(existing_tab);
+                        } else {
+                            self.load_file(path);
+                        }
                         return true;
                     }
                 }
@@ -1596,42 +1703,6 @@ impl EditorState {
         None
     }
 
-    fn populate_file_tree(
-        &self,
-        tree: &mut FileTree,
-        path: &PathBuf,
-        parent_idx: u32,
-        depth: u8,
-    ) -> std::io::Result<()> {
-        let mut entries: Vec<_> = std::fs::read_dir(path)?.filter_map(|e| e.ok()).collect();
-        entries.sort_by(|a, b| {
-            let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            match (a_is_dir, b_is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.file_name().cmp(&b.file_name()),
-            }
-        });
-
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type()?.is_dir();
-            let kind = if is_dir {
-                FileKind::Directory
-            } else {
-                FileKind::File
-            };
-            let idx = tree.add_node(&name, kind, parent_idx, depth);
-
-            if is_dir && depth < 5 {
-                let _ = self.populate_file_tree(tree, &entry.path(), idx, depth + 1);
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn insert_char(&mut self, ch: char) {
         let pos = self.cursor_byte_pos();
         let before_pieces = self.buffer.get_pieces();
@@ -1642,6 +1713,9 @@ impl EditorState {
         self.buffer.insert(pos, &text);
         self.cursor_col += ch.len_utf8();
         self.is_dirty = true;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.is_dirty = true;
+        }
         self.buffer_version += 1;
 
         let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
@@ -1666,6 +1740,9 @@ impl EditorState {
         self.buffer.insert(pos, tab_text);
         self.cursor_col += tab_text.len();
         self.is_dirty = true;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.is_dirty = true;
+        }
         self.buffer_version += 1;
 
         let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
@@ -1720,6 +1797,9 @@ impl EditorState {
         self.cursor_line += 1;
         self.cursor_col = full_indent.len();
         self.is_dirty = true;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.is_dirty = true;
+        }
         self.buffer_version += 1;
 
         let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
@@ -1746,6 +1826,9 @@ impl EditorState {
                 self.buffer.delete(prev_pos, pos);
                 self.cursor_col -= pos - prev_pos;
                 self.is_dirty = true;
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.is_dirty = true;
+                }
                 self.buffer_version += 1;
 
                 let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
@@ -1776,6 +1859,9 @@ impl EditorState {
                     self.cursor_line = prev_line;
                     self.cursor_col = prev_len;
                     self.is_dirty = true;
+                    if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                        tab.is_dirty = true;
+                    }
                     self.buffer_version += 1;
 
                     let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);
@@ -1803,6 +1889,9 @@ impl EditorState {
 
             self.buffer.delete(pos, next_pos);
             self.is_dirty = true;
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.is_dirty = true;
+            }
             self.buffer_version += 1;
 
             let cursor_after = CursorPosition::new(self.cursor_line, self.cursor_col);

@@ -14,6 +14,7 @@ pub struct FileNode {
     pub kind: FileKind,
     pub parent_idx: u32,
     pub first_child: u32,
+    pub last_child: u32,
     pub next_sibling: u32,
     pub depth: u8,
     pub is_expanded: bool,
@@ -72,6 +73,7 @@ impl FileTree {
             kind,
             parent_idx,
             first_child: u32::MAX,
+            last_child: u32::MAX,
             next_sibling: u32::MAX,
             depth,
             is_expanded: kind == FileKind::Directory,
@@ -81,18 +83,32 @@ impl FileTree {
             modified_time: 0,
         });
 
-        // 更新父节点的first_child链表
+        // 更新父节点的first_child链表 - O(1) 尾指针插入
         if parent_idx != u32::MAX {
-            let parent = &mut self.nodes[parent_idx as usize];
-            if parent.first_child == u32::MAX {
-                parent.first_child = idx;
-            } else {
-                // 找到最后一个兄弟节点
-                let mut sibling = parent.first_child;
-                while self.nodes[sibling as usize].next_sibling != u32::MAX {
-                    sibling = self.nodes[sibling as usize].next_sibling;
+            let parent_idx_usize = parent_idx as usize;
+            if parent_idx_usize < self.nodes.len() {
+                // 先读取 last_child 值，避免同时借用
+                let last_child_opt = {
+                    let parent = &self.nodes[parent_idx_usize];
+                    if parent.first_child == u32::MAX {
+                        None
+                    } else {
+                        Some(parent.last_child)
+                    }
+                };
+
+                if let Some(last) = last_child_opt {
+                    // 使用 unsafe 绕过借用检查：我们知道 parent_idx != last
+                    let parent_ptr = self.nodes.as_mut_ptr();
+                    unsafe {
+                        (*parent_ptr.add(parent_idx_usize)).last_child = idx;
+                        (*parent_ptr.add(last as usize)).next_sibling = idx;
+                    }
+                } else {
+                    let parent = &mut self.nodes[parent_idx_usize];
+                    parent.first_child = idx;
+                    parent.last_child = idx;
                 }
-                self.nodes[sibling as usize].next_sibling = idx;
             }
         }
 

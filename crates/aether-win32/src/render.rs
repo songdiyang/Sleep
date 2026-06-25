@@ -5370,6 +5370,56 @@ impl EditorState {
             let right_panel_btn_x = minimize_x - panel_btn_width;
             let bottom_panel_btn_x = right_panel_btn_x - panel_btn_width;
 
+            // 在标题栏中间显示当前文件名
+            let file_name = self.current_tab().file_name();
+            let title_text = if self.is_dirty {
+                format!("{} ● - Aether", file_name)
+            } else {
+                format!("{} - Aether", file_name)
+            };
+            let title_wide: Vec<u16> = title_text.encode_utf16().chain(Some(0)).collect();
+            let title_format = self
+                .render_ctx
+                .text_format_cache
+                .get_format(
+                    13.0,
+                    DWRITE_FONT_WEIGHT_NORMAL.0 as u32,
+                    DWRITE_TEXT_ALIGNMENT_CENTER.0 as u32,
+                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER.0 as u32,
+                )
+                .unwrap();
+            let title_text_color = color_f(0.85, 0.85, 0.85, 1.0);
+            let title_text_brush = self
+                .render_ctx
+                .brush_cache
+                .get_brush(target, &title_text_color)
+                .unwrap();
+            // 计算标题区域：在菜单项右侧、按钮左侧
+            let menu_end_x = if self.menu_bar.item_x_positions.len() > 0 {
+                self.menu_bar
+                    .item_x_positions
+                    .last()
+                    .copied()
+                    .unwrap_or(0.0)
+                    + self.menu_bar.item_widths.last().copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let title_rect = D2D_RECT_F {
+                left: menu_end_x + 10.0,
+                top: y,
+                right: bottom_panel_btn_x - 10.0,
+                bottom: y + height,
+            };
+            target.DrawText(
+                &title_wide,
+                &title_format,
+                &title_rect,
+                &title_text_brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
             // 按钮颜色
             let default_bg = if self.theme.glass_enabled {
                 self.theme.titlebar_bg
